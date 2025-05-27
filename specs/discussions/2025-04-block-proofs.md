@@ -8,28 +8,44 @@ this will become part of the implementation and/or the final spec._
 
 ### Submitting blocks to the parent
 
-1. Assume the following information (at least) in the `BlockHeader` of a shard block. It includes
-   common fields included in other blockchains along with a few additional protocol-specific fields,
-   mainly:
-   - A reference to the latest block seen by the farmer in the beacon chain when proposing this
-     block. The latest beacon chain included should be stable enough to ensure that other nodes in
-     the system have already seen it and won't reject it or need to delay their verification because
-     they haven't seen it yet. This is why there client implementations will try to propose a as
-     beacon chain reference in the new block that can be consider stable like
-     `beacon_chain_head - STABILITY_DELAY` with e.g. `STABILITY_DELAY = 12` instead of the most
-     recent one they see. The verification performed by nodes to accept the block is that the beacon
-     chain block referenced is part of the history of the beacon chain, i.e. it follows of all the
-     consensus rules for the beacon chain, and it was proposed in a slot that happened after the one
-     from the block referenced by the beacon chain reference of the parent block, and consequently
-     of the current shard's block parent block (as long no reorgs in the beacon chain or the shard
-     have happened).
-   - The root hash of all the blocks and segments from the child shard being submitted to the upper
-     layers in this block (more about this in the sections below).
-   - The root hash of the state of the child shard after applying the transactions in this block.
-   - Raw consensus information about the child shard that needs to be included in a block to
-     submitted to the upper layers (mainly, child shard's `SegmentDescription` for now).
+> Note: You'll start seeing code striken through and commented throughout the doc. These are parts
+> of the discussion that have been deprecated and are already being incorporated into the code.
+> Instead of trying to reflect the code changes here, we will use the code as the source of truth
+> and point to the parts of the code that implemented this part of the discussion as a quote. This
+> way we keep track of the original structure of the discussion, but use the code as the single
+> source of truth (so we don't have to keep incorporating changes here). Discussions may have moved
+> to code or specific PRs.
+>
+> Source code:
+>
+> - PRs diff:
+>   https://github.com/nazar-pc/abundance/compare/74d43a65c2bca89d89aaf79cc844def2a44563bd...ce45a2f25bc87a6647e36a98540294b5c6e9ec49
+> - Zulip discussion:
+>   https://abundance.zulipchat.com/#narrow/channel/495788-research/topic/Mechanics.20of.20child.20block.20submission.20to.20parent.20chain/with/518994821
 
-```rust
+~~1. Assume the following information (at least) in the `BlockHeader` of a shard block. It includes
+
+    common fields included in other blockchains along with a few additional protocol-specific fields,
+    mainly:
+    - A reference to the latest block seen by the farmer in the beacon chain when proposing this
+      block. The latest beacon chain included should be stable enough to ensure that other nodes in
+      the system have already seen it and won't reject it or need to delay their verification because
+      they haven't seen it yet. This is why there client implementations will try to propose a as
+      beacon chain reference in the new block that can be consider stable like
+      `beacon_chain_head - STABILITY_DELAY` with e.g. `STABILITY_DELAY = 12` instead of the most
+      recent one they see. The verification performed by nodes to accept the block is that the beacon
+      chain block referenced is part of the history of the beacon chain, i.e. it follows of all the
+      consensus rules for the beacon chain, and it was proposed in a slot that happened after the one
+      from the block referenced by the beacon chain reference of the parent block, and consequently
+      of the current shard's block parent block (as long no reorgs in the beacon chain or the shard
+      have happened).
+    - The root hash of all the blocks and segments from the child shard being submitted to the upper
+      layers in this block (more about this in the sections below).
+    - The root hash of the state of the child shard after applying the transactions in this block.
+    - Raw consensus information about the child shard that needs to be included in a block to
+      submitted to the upper layers (mainly, child shard's `SegmentDescription` for now).~~
+
+<!-- ```rust
 struct BlockHeader {
 	/// Block number
 	number: BlockNumber
@@ -52,51 +68,67 @@ struct BlockHeader {
 	/// allowing to easily generate proofs for the history of the shard.
 	parent_mmr_history_root: Hash
 }
-```
+``` -->
 
 2. Fields in the `BlockHeader` can be arranged in a Merkle Tree to compute the hash of the block as
    the Merkle proof of this tree instead of directly hashing the whole header. This has an
    interesting consequences, as it would allow to generate proofs for specific elements of the block
-   header without requiring the whole header.
+   header without requiring the whole header. This also provides the ability of walk the tree of
+   networks from a block in the beacon chain to any blocks (and implicitly state) of any shard in
+   the system in a verifiable way. Everything is a system is a tree from which proofs for the
+   history and its underlying state can be generated.
 
-> Appendix: It is worth structuring the block header as a Merkle tree to generate proofs for
-> specific header fields like `tx_root`, `state_root` `parent_mmr_history_root` and
-> `consensus_info_root` are already represented as root references to the underlying data structured
-> as a tree? A proof for some field in the block header will be of `log_2(num_fields_in_header)` *
-> hash_length`. The savings of hashing the whole header instead of using a tree and having to provide all the fields in the header to verify the block can be computed as `(total_block_header_size-log_2(num_fields_in_header)*hash_length)/total_block_header_size`.
-> If this savings are worth the computational overhead of having to compute the Merkle tree, then we
-> should consider using trees for headers.
+   > Code that illustrates the block header as a Merkle tree, where the hash of the block considers
+   > each section of the header as a leaf in the tree:
+   > https://github.com/nazar-pc/abundance/compare/74d43a65c2bca89d89aaf79cc844def2a44563bd...ce45a2f25bc87a6647e36a98540294b5c6e9ec49#diff-b36701641b85d5206ed6ac1a736fb8f4f49c0e8d0995def60a8aca830ccb5390R740-R767
 
-3. Farmers submit in a transaction the `BlockHeader` for new blocks to the parent chain. Blocks are
-   only accepted if the follow the consensus rules for block validation (i.e. the parent chain
-   behaves as a light client of its own child shard). A few things that nodes in the parent need to
+   ![Block header as a tree](./images/block-header.png)
+
+3. Shard farmers submit the `BlockHeader` of new blocks to the parent chain. Blocks are only
+   accepted if they follow the consensus rules for block validation (i.e. the parent chain behaves
+   as a light client of its own child shard). A few things that nodes in the parent need to
    considering when performing this validation are:
 
-   - (a) The block header references a valid beacon chain block. This is important to ensure that
-     the block being submitted is part of the global history and can be verified by the parent
-     chain. The beacon chain block referenced is valid if:
+- (a) It has an increasing block number (unless a fork has happened and can be clearly identified).
+  If the block number of the block being submitted is not the next immediate one and is lower or
+  equal than the latest committed in the parent, it means that a reorg has happened, and the parent
+  chain needs to also reorg its own view of the child shard's history. A `STABILITY_DELAY = 12` is
+  used before appending blocks to prevent triggering unnecessary reorgs (the specifics of this is
+  shared in the sections below).
 
-     - (i) it correctly extends last referenced beacon chain block according to the view of the
-       checking node.
-     - (ii) Assuming that the child block, `i` is being proposed for PoT slot `N` and that its
-       parent block, `i-1`, was created in slot `N-x`, the beacon chain block referenced in the
-       child block header `i` is valid only if it belongs to the window of slots `N-x+1` to `N`
-       (i.e. child blocks can't reference blocks from the future, or that are behind a block already
-       referenced by an older block of the child's history). This, of course, assumes that no
-       re-orgs have happened in the block. More information about how to handle potential re-orgs
-       will be shared in the sections below.
+- (b) The result of the validation notifies the parent chain if the validated block can be appended
+  to the child shard history or if a reorg is required, and its view of the child shard history
+  needs to be adjusted accordingly.
 
-   - (b) It has an increasing block number (unless a fork has happened and can be clearly
-     identified). If the block number of the block being submitted is not the next immediate one and
-     is lower or equal than the latest committed in the parent, it means that a reorg has happened,
-     and the parent chain needs to also reorg its own view of the child shard's history. A
-     `STABILITY_DELAY = 12` is used before appending blocks to prevent triggering unnecessary reorgs
-     (the specifics of this is shared in the sections below).
-   - (c) The result of the validation notifies the parent chain if the validated block can be
-     appended to the child shard history or if a reorg is required, and its view of the child shard
-     history needs to be adjusted accordingly.
+- (c) The block header references a valid beacon chain block. This is important to ensure that the
+  block being submitted is part of the global history and can be verified by the parent chain. The
+  beacon chain block referenced is valid if:
 
-```rust
+  - (i) it correctly extends last referenced beacon chain block according to the view of the
+    checking node.
+  - (ii) Assuming that the shard block, `n` is being proposed for PoT slot `t`, that its parent
+    block, `n-1`, was created in slot `t-x`, and that the latest block seen for the beacon chain
+    (i.e. the head of the beacon chain) has been proposed in slot `t+x`, the beacon chain block
+    referenced in the shard block header `n` is valid only if it belongs to the window of slots
+    `t-x+1` to `t+x` (i.e. shard blocks can't reference blocks from the future, or that are behind a
+    block already referenced by an older block of the child's history. The beacon chain reference
+    should always be in increasing order). This, of course, assumes that no re-orgs have happened in
+    the block. More information about how to handle potential re-orgs will be shared in the sections
+    below.
+
+![Illustration of valid beacon chain references from shard blocks](./images/beacon_chain_ref.png)
+
+4. The way in which farmers in the shard submit blocks to the parent is as follows:
+   - They broadcast the block header to a dedicated channel where headers for child blocks are
+     submitted.
+   - Farmers in the parent chain will be listening to this channel, and include new blocks to a pool
+     of uncommitted child blocks.
+   - In every new parent chain block, the farmer entitled to propose the block will include the
+     uncommitted child blocks from the child block pool that it sees. We can think of this child
+     block pool as regular transaction pool independent from the raw transaction pool, and that
+     implements its own logic for the commitment of child blocks in their corresponding parents.
+
+````rust
 /// Enum to represent the validation result of a block submission.
 enum ValidationResult {
 	Valid,
@@ -124,17 +156,23 @@ fn validate_beacon_chain_reference(
 	let parent_block_slot = parent_header.number;
 	let current_block_slot = block_header.number;
 
-	if beacon_block_number < parent_block_slot + 1 || beacon_block_number > current_block_slot {
-		return Err(Error::InvalidBeaconChainReference);
-	}
+	```rust
+		// Calculate the valid slot window: [t-x+1, t+x]
+		let valid_slot_start = parent_block_slot + 1;
+		let valid_slot_end = beacon_chain_header.number; // t+x is the head of the beacon chain
 
-	// Ensure the beacon block is not referencing a block from the future.
-	if beacon_block_number + stability_delay > beacon_chain_header.number {
-		return Err(Error::InvalidBeaconChainReference);
-	}
+		if beacon_block_number < valid_slot_start || beacon_block_number > valid_slot_end {
+			return Err(Error::InvalidBeaconChainReference);
+		}
 
-	Ok(())
-}
+		// Ensure the beacon block is not referencing a block from the future.
+		if beacon_block_number > beacon_chain_header.number {
+			return Err(Error::InvalidBeaconChainReference);
+		}
+
+		Ok(())
+	}
+	```
 
 /// Validates the submitted block header against the following conditions and determines
 /// whether the block can be appended to the child shard history or if a reorg is required.
@@ -227,21 +265,18 @@ fn verify_merkle_proofs<T: SegmentDescription>(block_header: &BlockHeader<T>) ->
 	// `parent_mmr_history_root` are consistent with the block header hash.
 	true
 }
-```
+````
 
-4. If the verification is successful, the following information is stored in the parent shard for
-   each shard. This information can be used to generate inclusion proofs for the blocks in the child
-   shard and compare the with the information submitted in the parent chain.
-
-```rust
-/// Data structure that is kept on-chain with the hash of the block submitted from the child shard.
-let shardBlocksMap = HashMap<ShardId, HashMap<BlockNumber, Hash>>
-```
+4. If the verification is successful, the information about the block headers for the child shards
+   that have been submitted to the parent network are included as part of the
+   `IntermediateShardBlockInfo` (see
+   https://github.com/nazar-pc/abundance/compare/74d43a65c2bca89d89aaf79cc844def2a44563bd...ce45a2f25bc87a6647e36a98540294b5c6e9ec49#diff-6ab9ec9f79e110d362dba28b1e6dc2e5832ab29768175fe6cb33eee16a5d2af9R44-R52).
 
 5. Full nodes in child shards represent their own history as Mountain Merkle Roots (MMRs) whose root
    is included as a field in every block, allowing them to include in every block a view of their
    history that would allow for the generation of proofs of their history that can be tracked back
    to the history of the beacon chain.
+
 6. The protocol is recursive, so immediate children from the beacon chain are also submitting their
    blocks to the beacon chain, and the beacon chain itself keeps a view of its child shards.
 
@@ -406,6 +441,82 @@ pub fn verify_recursive_proof(
 The following diagram illustrates the recursive proof structure:
 ![Proof Structure](./images/block_proof_structure.png)
 
+### Syncing a shard from scratch
+
+In order for nodes to be able to sync a shard from scratch they still need to verify (and if they
+don't have it available, sync) a view of the beacon chain so they can verify the beacon chain
+references included in the blocks that they are syncing from the child shard. For now, we can
+consider that the syncing mechanisms available to sync with the beacon chain and any child shard can
+be implemented as it is currently done for
+[single-chain Subspace](https://subspace.github.io/protocol-specs/docs/consensus/consensus_chain#synchronization).
+
+Every beacon chain block has the list of blocks committed for its immediate sibling shards. With
+this information, nodes are able to sync immediate sibling shards. The process is as follows:
+
+- Get the last confirmed block for the shard.
+- Verify the validity of the shard block by running the corresponding consensus rules, and validate
+  that its beacon chain reference is valid.
+- From here on, the node starts syncing from the tip of the child shard by downloading the blocks in
+  the shard and verifying them against the beacon chain. Nodes will walk the beacon chain (which
+  includes the commitment of child blocks), and the shard chain in parallel. When a child block
+  commitment is found in the beacon chain, it is conveniently verified against the corresponding
+  block retrieved by walking the child shard.
+- The fact that everything is a tree in the system allows as we sync to walk the hierarchy from
+  beacon chain blocks down to the blocks of the child shard that a node is currently syncing.
+
+> TODO(adlrocha): Add a section that describes how a child shard light client would sync from
+> scratch, and how the references to the beacon chain can be verified (depending on the state it
+> keeps of it). See also
+> https://abundance.zulipchat.com/#narrow/channel/495788-research/topic/Light.20client/near/517250894
+> when writing this section.
+
+> https://abundance.zulipchat.com/#narrow/channel/495788-research/topic/Light.20client/near/517250894
+> Actually I think things might be a bit simpler than I originally expected. First observation is
+> that I think it may not be necessary to have external (to the blockchain) light client for
+> arbitrary shard. It should be sufficient, at least for many use cases, to have a light client of
+> the beacon chain only. Anything that is confirmed by the beacon chain will then be provable from
+> it, hence light clients of individual shards should not be (strictly speaking) necessary. Though
+> there might be use cases where we'll still need to retrieve information quicker. Second
+> observation is that to do complete verification from genesis then it might be necessary to run
+> both beacon chain and shard chain in parallel. However, if beacon chain is already synced, then
+> shard chain can be bootstrapped from the last confirmed block of the shard, bypassing the whole
+> DSN sync and deep history verification challenges.
+
 ### Beacon Chain Reorgs
 
-> TODO: Describe how the protocol is impacted if a re-org happens in the beacon chain.
+- We can embed the reorgs management as part of the consensus logic and the longest-chain rule.
+- Farmers will be proposing blocks that need to include a reference to a valid beacon chain block.
+- As soon as a farmer in a shard chain detects a reorg in the beacon chain, it will start proposing
+  blocks that build upon the new history of the beacon chain block. If more farmers start seeing
+  that re-org the chain naturally should start building upon the new longest-chain and discarding
+  the chain that pointed to the beacon chain history previous to the re-org.
+- Some transactions may be invalidated by the re-org, but the behavior is the same as it currently
+  is in single chain longest-chain blcokchains.
+
+> Note: We are even considering making transactions mortal, i.e. to only be available for 100
+> blocks.
+
+- The beacon chain re-org will also trigger a reversion of the global history of super segments.
+  This reversion will take back to the past the latest global index of the system's history. This
+  marks the segments as invalid, and all the sectors including these segments will be invalidated
+  and will need to be re-plotted (in the same way as it happens when a sector expires). This should
+  be naturally handled by the longest-chain rule in the same way that blocks are handled, because
+  everything is included in a block and part of the same tree.
+- Additionally, if after the global_index reversion if there are segments that are still valid but
+  include blocks from the beacon chain and child shard that need to be re-orged, these segments need
+  to be notified as invalid to the beacon chain to remove them from the global history and mark them
+  as invalid too.
+
+### Parent chain re-orgs.
+
+- When a parent chain re-orgs, this shouldn't impact the child shard's history as the child shard is
+  already following the beacon chain. The parent chain will reorg its view of the child shard
+  history, but this won't impact the child shard's history.
+- When it performs its re-org, the parent chain needs to introduce all segments and block headers
+  that have been submitted back into the pool, so when the re-org is stabilised it can start
+  re-committing and forwarding the segments and blocks that were submitted before the re-org.
+
+> NOTE: This is key for the trust model of the system, and we should be fine with this. Leaf shards
+> rely on their parents for the operation, and their performance (and potentially security) will be
+> impacted by the operation of their parents. If the parent decides to censor a child shard, so be
+> it. This is something that we will need to consider once we start with the design of farming.
