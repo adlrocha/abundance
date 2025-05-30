@@ -1,6 +1,9 @@
 use crate::sync_from_dsn::PieceGetter;
 use crate::sync_from_dsn::segment_header_downloader::SegmentHeaderDownloader;
 use crate::utils::wait_for_block_import;
+use ab_archiving::reconstructor::Reconstructor;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::segments::SegmentIndex;
 use ab_erasure_coding::ErasureCoding;
 use sc_client_api::{AuxStore, BlockchainEvents, ProofProvider};
 use sc_consensus::import_queue::ImportQueueService;
@@ -20,9 +23,6 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use subspace_archiving::reconstructor::Reconstructor;
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::segments::SegmentIndex;
 use subspace_data_retrieval::segment_downloading::download_segment_pieces;
 use subspace_networking::Node;
 use tokio::task;
@@ -166,7 +166,7 @@ where
                 .ok_or_else(|| {
                     format!("Failed to get segment index {segment_index} during snap sync")
                 })?;
-            let last_archived_block = segment_header.last_archived_block();
+            let last_archived_block = segment_header.last_archived_block;
 
             // If older segment header ends with fully archived block then no additional
             // information is necessary

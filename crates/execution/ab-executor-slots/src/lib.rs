@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use ab_aligned_buffer::{OwnedAlignedBuffer, SharedAlignedBuffer};
-use ab_contracts_common::Address;
+use ab_core_primitives::address::Address;
 use alloc::boxed::Box;
 use smallvec::SmallVec;
 use tracing::debug;
@@ -178,7 +178,7 @@ impl Slots {
         let new_contracts = &mut self.0.new_contracts;
 
         if new_contracts.contains(&owner) {
-            debug!(%owner, "Not adding new contract duplicate");
+            debug!(?owner, "Not adding new contract duplicate");
             return false;
         }
 
@@ -388,14 +388,14 @@ impl<'a> NestedSlots<'a> {
     #[inline(always)]
     pub fn add_new_contract(&mut self, owner: Address) -> bool {
         let Some(inner) = self.inner_rw() else {
-            debug!(%owner, "`add_new_contract` access violation");
+            debug!(?owner, "`add_new_contract` access violation");
             return false;
         };
 
         let new_contracts = &mut inner.new_contracts;
 
         if new_contracts.contains(&owner) {
-            debug!(%owner, "Not adding new contract duplicate");
+            debug!(?owner, "Not adding new contract duplicate");
             return false;
         }
 
@@ -414,7 +414,7 @@ impl<'a> NestedSlots<'a> {
         let result = self.get_code_internal(owner);
 
         if result.is_none() {
-            debug!(%owner, "`get_code` access violation");
+            debug!(?owner, "`get_code` access violation");
         }
 
         result
@@ -596,10 +596,9 @@ impl<'a> NestedSlots<'a> {
             // Ensure that slot is not currently being written to
             if let Some(read_write) = slot_access.iter().find_map(|slot_access| {
                 (slot_access.slot_index == slot_index).then_some(slot_access.read_write)
-            }) {
-                if read_write {
-                    return None;
-                }
+            }) && read_write
+            {
+                return None;
             }
 
             let slot = &slots

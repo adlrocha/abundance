@@ -17,15 +17,15 @@
 
 use crate::object_fetcher::segment_header::{MAX_SEGMENT_PADDING, strip_segment_header};
 use crate::object_fetcher::{Error, MAX_ENCODED_LENGTH_SIZE, decode_data_length};
+use ab_archiving::objects::GlobalObject;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::{PieceIndex, Record};
+use ab_core_primitives::segments::RecordedHistorySegment;
 use parity_scale_codec::{Decode, Input};
 use std::cmp::min;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::Formatter;
-use subspace_archiving::objects::GlobalObject;
-use subspace_core_primitives::hashes::{Blake3Hash, blake3_hash};
-use subspace_core_primitives::pieces::{PieceIndex, Record};
-use subspace_core_primitives::segments::RecordedHistorySegment;
 use tracing::{debug, trace};
 
 /// The fixed value of every padding byte.
@@ -574,7 +574,7 @@ impl PartialObject {
                 return Ok(None);
             };
 
-            let data_hash = blake3_hash(&data);
+            let data_hash = blake3::hash(&data).into();
 
             if data_hash == mapping.hash {
                 return Ok(Some(data));
@@ -792,8 +792,8 @@ fn padded_data<'data>(
 #[cfg(test)]
 mod test {
     use super::*;
+    use ab_archiving::archiver::SegmentItem;
     use parity_scale_codec::Encode;
-    use subspace_archiving::archiver::SegmentItem;
 
     #[test]
     fn padding_byte_value_constant() {

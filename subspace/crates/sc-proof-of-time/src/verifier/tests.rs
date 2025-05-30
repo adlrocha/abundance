@@ -1,8 +1,8 @@
 use crate::verifier::PotVerifier;
-use sp_consensus_subspace::{PotNextSlotInput, PotParametersChange};
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pot::{PotParametersChange, PotSeed, SlotNumber};
+use sp_consensus_subspace::PotNextSlotInput;
 use std::num::NonZeroU32;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pot::{PotSeed, SlotNumber};
 
 const SEED: [u8; 16] = [
     0xd6, 0x66, 0xcc, 0xd8, 0xd5, 0x93, 0xc2, 0x3d, 0xa8, 0xdb, 0x6b, 0x5b, 0x14, 0x13, 0xb1, 0x3a,
@@ -12,7 +12,7 @@ const SEED: [u8; 16] = [
 fn test_basic() {
     let genesis_seed = PotSeed::from(SEED);
     let slot_iterations = NonZeroU32::new(512).unwrap();
-    let checkpoints_1 = subspace_proof_of_time::prove(genesis_seed, slot_iterations).unwrap();
+    let checkpoints_1 = ab_proof_of_time::prove(genesis_seed, slot_iterations).unwrap();
 
     let verifier = PotVerifier::new(genesis_seed, 1000);
 
@@ -63,7 +63,7 @@ fn test_basic() {
     );
 
     let seed_1 = checkpoints_1.output().seed();
-    let checkpoints_2 = subspace_proof_of_time::prove(seed_1, slot_iterations).unwrap();
+    let checkpoints_2 = ab_proof_of_time::prove(seed_1, slot_iterations).unwrap();
 
     // Expected to be valid
     assert!(verifier.is_output_valid(
@@ -132,15 +132,15 @@ fn parameters_change() {
     let genesis_seed = PotSeed::from(SEED);
     let slot_iterations_1 = NonZeroU32::new(512).unwrap();
     let entropy = Blake3Hash::from([1; Blake3Hash::SIZE]);
-    let checkpoints_1 = subspace_proof_of_time::prove(genesis_seed, slot_iterations_1).unwrap();
+    let checkpoints_1 = ab_proof_of_time::prove(genesis_seed, slot_iterations_1).unwrap();
     let slot_iterations_2 = slot_iterations_1.saturating_mul(NonZeroU32::new(2).unwrap());
-    let checkpoints_2 = subspace_proof_of_time::prove(
+    let checkpoints_2 = ab_proof_of_time::prove(
         checkpoints_1.output().seed_with_entropy(&entropy),
         slot_iterations_2,
     )
     .unwrap();
     let checkpoints_3 =
-        subspace_proof_of_time::prove(checkpoints_2.output().seed(), slot_iterations_2).unwrap();
+        ab_proof_of_time::prove(checkpoints_2.output().seed(), slot_iterations_2).unwrap();
 
     let verifier = PotVerifier::new(genesis_seed, 1000);
 

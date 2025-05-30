@@ -40,7 +40,14 @@ use crate::single_disk_farm::plotting::{
 use crate::single_disk_farm::reward_signing::reward_signing;
 use crate::utils::{AsyncJoinOnDrop, tokio_rayon_spawn_handler};
 use crate::{KNOWN_PEERS_CACHE_SIZE, farm};
+use ab_core_primitives::block::BlockRoot;
+use ab_core_primitives::ed25519::Ed25519PublicKey;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::Record;
+use ab_core_primitives::sectors::SectorIndex;
+use ab_core_primitives::segments::{HistorySize, SegmentIndex};
 use ab_erasure_coding::ErasureCoding;
+use ab_proof_of_space::Table;
 use async_lock::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use async_trait::async_trait;
 use event_listener_primitives::{Bag, HandlerId};
@@ -66,18 +73,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use std::{fmt, fs, io, mem};
-use subspace_core_primitives::hashes::{Blake3Hash, blake3_hash};
-use subspace_core_primitives::pieces::Record;
-use subspace_core_primitives::sectors::SectorIndex;
-use subspace_core_primitives::segments::{HistorySize, SegmentIndex};
 use subspace_farmer_components::FarmerProtocolInfo;
 use subspace_farmer_components::file_ext::FileExt;
 use subspace_farmer_components::reading::ReadSectorRecordChunksMode;
 use subspace_farmer_components::sector::{SectorMetadata, SectorMetadataChecksummed, sector_size};
 use subspace_networking::KnownPeersManager;
-use subspace_proof_of_space::Table;
 use subspace_rpc_primitives::{FarmerAppInfo, SolutionResponse};
-use subspace_verification::sr25519::PublicKey;
 use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -110,11 +111,10 @@ pub enum SingleDiskFarmInfo {
     V0 {
         /// ID of the farm
         id: FarmId,
-        /// Genesis hash of the chain used for farm creation
-        #[serde(with = "hex")]
-        genesis_hash: [u8; 32],
+        /// Genesis root of the beacon chain used for farm creation
+        genesis_root: BlockRoot,
         /// Public key of identity used for farm creation
-        public_key: PublicKey,
+        public_key: Ed25519PublicKey,
         /// How many pieces does one sector contain.
         pieces_in_sector: u16,
         /// How much space in bytes is allocated for this farm
@@ -128,14 +128,14 @@ impl SingleDiskFarmInfo {
     /// Create new instance
     pub fn new(
         id: FarmId,
-        genesis_hash: [u8; 32],
-        public_key: PublicKey,
+        genesis_root: BlockRoot,
+        public_key: Ed25519PublicKey,
         pieces_in_sector: u16,
         allocated_space: u64,
     ) -> Self {
         Self::V0 {
             id,
-            genesis_hash,
+            genesis_root,
             public_key,
             pieces_in_sector,
             allocated_space,
@@ -199,13 +199,13 @@ impl SingleDiskFarmInfo {
     }
 
     /// Genesis hash of the chain used for farm creation
-    pub fn genesis_hash(&self) -> &[u8; 32] {
-        let Self::V0 { genesis_hash, .. } = self;
-        genesis_hash
+    pub fn genesis_root(&self) -> &BlockRoot {
+        let Self::V0 { genesis_root, .. } = self;
+        genesis_root
     }
 
     /// Public key of identity used for farm creation
-    pub fn public_key(&self) -> &PublicKey {
+    pub fn public_key(&self) -> &Ed25519PublicKey {
         let Self::V0 { public_key, .. } = self;
         public_key
     }
@@ -288,7 +288,7 @@ where
     /// RPC client connected to Subspace node
     pub node_client: NC,
     /// Address where farming rewards should go
-    pub reward_address: PublicKey,
+    pub reward_address: Ed25519PublicKey,
     /// Plotter
     pub plotter: Arc<dyn Plotter + Send + Sync>,
     /// Erasure coding instance to use.
@@ -364,9 +364,9 @@ pub enum SingleDiskFarmError {
         /// Farm ID
         id: FarmId,
         /// Public key used during farm creation
-        correct_public_key: PublicKey,
+        correct_public_key: Ed25519PublicKey,
         /// Current public key
-        wrong_public_key: PublicKey,
+        wrong_public_key: Ed25519PublicKey,
     },
     /// Invalid number pieces in sector
     #[error(
@@ -490,9 +490,9 @@ pub enum SingleDiskFarmScrubError {
     #[error("Identity public key {identity} doesn't match public key in the disk farm info {info}")]
     PublicKeyMismatch {
         /// Identity public key
-        identity: PublicKey,
+        identity: Ed25519PublicKey,
         /// Disk farm info public key
-        info: PublicKey,
+        info: Ed25519PublicKey,
     },
     /// Metadata file does not exist
     #[error("Metadata file does not exist at {file}")]
@@ -683,7 +683,7 @@ impl AllocatedSpaceDistribution {
         } else {
             0
         };
-        let target_sector_count = match SectorIndex::try_from(target_sector_count) {
+        let target_sector_count = match u16::try_from(target_sector_count).map(SectorIndex::from) {
             Ok(target_sector_count) if target_sector_count < SectorIndex::MAX => {
                 u16::from(target_sector_count)
             }
@@ -1242,16 +1242,16 @@ impl SingleDiskFarm {
                 ))
             })?
         };
-        let public_key = identity.public_key().to_bytes().into();
+        let public_key = identity.public_key();
 
         let (single_disk_farm_info, single_disk_farm_info_lock) =
             match SingleDiskFarmInfo::load_from(directory)? {
                 Some(mut single_disk_farm_info) => {
-                    if &farmer_app_info.genesis_hash != single_disk_farm_info.genesis_hash() {
+                    if &farmer_app_info.genesis_root != single_disk_farm_info.genesis_root() {
                         return Err(SingleDiskFarmError::WrongChain {
                             id: *single_disk_farm_info.id(),
-                            correct_chain: hex::encode(single_disk_farm_info.genesis_hash()),
-                            wrong_chain: hex::encode(farmer_app_info.genesis_hash),
+                            correct_chain: hex::encode(single_disk_farm_info.genesis_root()),
+                            wrong_chain: hex::encode(farmer_app_info.genesis_root),
                         });
                     }
 
@@ -1314,7 +1314,7 @@ impl SingleDiskFarm {
                 None => {
                     let single_disk_farm_info = SingleDiskFarmInfo::new(
                         FarmId::new(),
-                        farmer_app_info.genesis_hash,
+                        farmer_app_info.genesis_root,
                         public_key,
                         max_pieces_in_sector,
                         allocated_space,
@@ -1791,9 +1791,9 @@ impl SingleDiskFarm {
                 }
             };
 
-            if PublicKey::from(identity.public.to_bytes()) != *info.public_key() {
+            if &identity.public_key() != info.public_key() {
                 return Err(SingleDiskFarmScrubError::PublicKeyMismatch {
-                    identity: PublicKey::from(identity.public.to_bytes()),
+                    identity: identity.public_key(),
                     info: *info.public_key(),
                 });
             }
@@ -2289,8 +2289,8 @@ impl SingleDiskFarm {
 
                 let (index_and_piece_bytes, expected_checksum) =
                     element.split_at(element_size as usize - Blake3Hash::SIZE);
-                let actual_checksum = blake3_hash(index_and_piece_bytes);
-                if *actual_checksum != *expected_checksum && element != &dummy_element {
+                let actual_checksum = *blake3::hash(index_and_piece_bytes).as_bytes();
+                if actual_checksum != expected_checksum && element != &dummy_element {
                     warn!(
                         %cache_offset,
                         actual_checksum = %hex::encode(actual_checksum),

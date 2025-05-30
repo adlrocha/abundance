@@ -2,9 +2,9 @@
 
 use crate::{SIGNING_CONTEXT, Seal};
 use ab_contracts_common::ContractError;
-use ab_contracts_common::env::Blake3Hash;
-use ab_contracts_io_type::trivial_type::TrivialType;
-use ab_transaction::{TransactionHeader, TransactionSlot};
+use ab_core_primitives::transaction::{TransactionHeader, TransactionSlot};
+use ab_io_type::trivial_type::TrivialType;
+use blake3::{Hasher, OUT_LEN};
 use core::slice;
 use schnorrkel::context::SigningContext;
 use schnorrkel::{Keypair, PublicKey, Signature};
@@ -18,8 +18,8 @@ pub fn hash_transaction(
     write_slots: &[TransactionSlot],
     payload: &[u128],
     nonce: u64,
-) -> Blake3Hash {
-    let mut hasher = blake3::Hasher::new();
+) -> [u8; OUT_LEN] {
+    let mut hasher = Hasher::new();
     hasher.update(header.as_bytes());
     for slot in read_slots {
         hasher.update(slot.as_bytes());
@@ -32,14 +32,14 @@ pub fn hash_transaction(
         unsafe { slice::from_raw_parts(payload.as_ptr().cast::<u8>(), size_of_val(payload)) };
     hasher.update(payload_bytes);
     hasher.update(&nonce.to_le_bytes());
-    *hasher.finalize().as_bytes()
+    hasher.finalize().into()
 }
 
 /// Sign transaction hash created with [`hash_transaction()`].
 ///
 /// [`hash_and_sign()`] helper function exists that combines this method with
 /// [`hash_transaction()`].
-pub fn sign(keypair: &Keypair, tx_hash: &Blake3Hash) -> Signature {
+pub fn sign(keypair: &Keypair, tx_hash: &[u8; OUT_LEN]) -> Signature {
     let signing_context = SigningContext::new(SIGNING_CONTEXT);
     keypair.sign(signing_context.bytes(tx_hash))
 }
@@ -67,7 +67,7 @@ pub fn hash_and_sign(
 pub fn verify(
     public_key: &PublicKey,
     expected_nonce: u64,
-    tx_hash: &Blake3Hash,
+    tx_hash: &[u8; OUT_LEN],
     signature: &Signature,
     nonce: u64,
 ) -> Result<(), ContractError> {

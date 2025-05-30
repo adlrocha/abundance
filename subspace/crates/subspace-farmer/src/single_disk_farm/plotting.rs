@@ -6,6 +6,11 @@ use crate::single_disk_farm::metrics::{SectorState, SingleDiskFarmMetrics};
 use crate::single_disk_farm::{
     BackgroundTaskError, Handlers, PlotMetadataHeader, RESERVED_PLOT_METADATA,
 };
+use ab_core_primitives::ed25519::Ed25519PublicKey;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::PieceOffset;
+use ab_core_primitives::sectors::{SectorId, SectorIndex};
+use ab_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
 use async_lock::{Mutex as AsyncMutex, RwLock as AsyncRwLock, Semaphore, SemaphoreGuard};
 use futures::channel::{mpsc, oneshot};
 use futures::stream::FuturesOrdered;
@@ -20,14 +25,9 @@ use std::ops::Range;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pieces::PieceOffset;
-use subspace_core_primitives::sectors::{SectorId, SectorIndex};
-use subspace_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
 use subspace_farmer_components::file_ext::FileExt;
 use subspace_farmer_components::plotting::PlottedSector;
 use subspace_farmer_components::sector::SectorMetadataChecksummed;
-use subspace_verification::sr25519::PublicKey;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task;
@@ -84,7 +84,7 @@ pub enum PlottingError {
 }
 
 pub(super) struct SectorPlottingOptions<'a, NC> {
-    pub(super) public_key: PublicKey,
+    pub(super) public_key: Ed25519PublicKey,
     pub(super) node_client: &'a NC,
     pub(super) pieces_in_sector: u16,
     pub(super) sector_size: usize,
@@ -929,7 +929,7 @@ where
                     .into_iter()
                     .next()
                     .flatten()
-                    .map(|segment_header| segment_header.segment_root());
+                    .map(|segment_header| segment_header.segment_root);
 
                 if let Some(sector_expiration_check_segment_root) =
                     maybe_sector_expiration_check_segment_root

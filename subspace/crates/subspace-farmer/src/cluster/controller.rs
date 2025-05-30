@@ -17,6 +17,8 @@ use crate::cluster::nats_client::{
 use crate::farm::{PieceCacheId, PieceCacheOffset};
 use crate::farmer_cache::FarmerCache;
 use crate::node_client::NodeClient;
+use ab_core_primitives::pieces::{Piece, PieceIndex};
+use ab_core_primitives::segments::{SegmentHeader, SegmentIndex};
 use anyhow::anyhow;
 use async_nats::HeaderValue;
 use async_trait::async_trait;
@@ -31,8 +33,6 @@ use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
-use subspace_core_primitives::segments::{SegmentHeader, SegmentIndex};
 use subspace_data_retrieval::piece_getter::PieceGetter;
 use subspace_rpc_primitives::{
     FarmerAppInfo, RewardSignatureResponse, RewardSigningInfo, SlotInfo, SolutionResponse,
@@ -104,7 +104,7 @@ impl GenericBroadcast for ClusterControllerArchivedSegmentHeaderBroadcast {
         Some(HeaderValue::from(
             format!(
                 "archived-segment-{}",
-                self.archived_segment_header.segment_index()
+                self.archived_segment_header.segment_index
             )
             .as_str(),
         ))

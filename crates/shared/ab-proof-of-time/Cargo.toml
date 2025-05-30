@@ -1,0 +1,43 @@
+[package]
+name = "ab-proof-of-time"
+description = "Subspace proof of time implementation"
+license = "0BSD"
+version = "0.1.0"
+authors = ["Rahul Subramaniyam <rahulksnv@gmail.com>"]
+edition = "2024"
+include = [
+    "/src",
+    "/Cargo.toml",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+# Necessary for CLI options to work on benches
+bench = false
+
+[dependencies]
+ab-core-primitives = { workspace = true }
+aes = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+cpufeatures = { workspace = true }
+
+[dev-dependencies]
+core_affinity = { workspace = true }
+criterion = { workspace = true }
+rand_core = { workspace = true }
+rand_chacha = { workspace = true }
+
+[[bench]]
+name = "pot"
+harness = false
+
+[[bench]]
+name = "pot-compare-cpu-cores"
+harness = false
+
+[lints]
+workspace = true

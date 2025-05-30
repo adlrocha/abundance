@@ -6,6 +6,7 @@
     array_chunks,
     const_trait_impl,
     exact_size_is_empty,
+    generic_arg_infer,
     int_roundings,
     iter_array_chunks,
     iter_collect_into,
@@ -16,7 +17,7 @@
 )]
 #![expect(incomplete_features, reason = "generic_const_exprs")]
 // TODO: This feature is not actually used in this crate, but is added as a workaround for
-//  https://github.com/rust-lang/rust/issues/133199
+//  https://github.com/rust-lang/rust/issues/141492
 #![feature(generic_const_exprs)]
 #![warn(rust_2018_idioms, missing_debug_implementations, missing_docs)]
 
@@ -29,13 +30,13 @@ pub mod sector;
 mod segment_reconstruction;
 
 use crate::file_ext::FileExt;
+use ab_core_primitives::segments::HistorySize;
 use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use static_assertions::const_assert;
 use std::fs::File;
 use std::future::Future;
 use std::io;
-use subspace_core_primitives::segments::HistorySize;
 
 /// Enum to encapsulate the selection between [`ReadAtSync`] and [`ReadAtAsync]` variants
 #[derive(Debug, Copy, Clone)]

@@ -4,15 +4,15 @@
 //! before they are used to reconstruct objects.
 
 use crate::object_fetcher::{Error, decode_data_length};
-use parity_scale_codec::{Decode, Encode, Input, IoReader};
-use std::io::Cursor;
-use subspace_archiving::archiver::SegmentItem;
-use subspace_archiving::objects::GlobalObject;
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::segments::{
+use ab_archiving::archiver::SegmentItem;
+use ab_archiving::objects::GlobalObject;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::segments::{
     ArchivedBlockProgress, LastArchivedBlock, SegmentHeader, SegmentIndex, SegmentRoot,
 };
+use parity_scale_codec::{Decode, Encode, Input, IoReader};
+use std::io::Cursor;
 
 /// Maximum block length for non-`Normal` extrinsic is 5 MiB.
 pub const MAX_BLOCK_LENGTH: u32 = 5 * 1024 * 1024;
@@ -25,42 +25,23 @@ pub const MAX_BLOCK_LENGTH: u32 = 5 * 1024 * 1024;
 /// <https://docs.substrate.io/reference/scale-codec/#fn-1>
 pub const MAX_SEGMENT_PADDING: usize = 3;
 
-/// The segment version this code knows how to parse.
-const SEGMENT_VERSION_VARIANT: u8 = 0;
-
 /// The variant for block continuations.
 const BLOCK_CONTINUATION_VARIANT: u8 = 3;
 
-/// The minimum size of a segment header.
+/// The size of a segment header.
 #[inline]
-pub fn min_segment_header_encoded_size() -> usize {
-    let min_segment_header = SegmentHeader::V0 {
-        segment_index: 0.into(),
+pub fn segment_header_encoded_size() -> usize {
+    let min_segment_header = SegmentHeader {
+        segment_index: SegmentIndex::ZERO.into(),
         segment_root: SegmentRoot::default(),
         prev_segment_header_hash: Blake3Hash::default(),
         last_archived_block: LastArchivedBlock {
-            number: 0,
-            archived_progress: ArchivedBlockProgress::Complete,
+            number: BlockNumber::ZERO.into(),
+            archived_progress: ArchivedBlockProgress::new_complete(),
         },
     };
 
     min_segment_header.encoded_size()
-}
-
-/// The maximum size of the segment header.
-#[inline]
-pub fn max_segment_header_encoded_size() -> usize {
-    let max_segment_header = SegmentHeader::V0 {
-        segment_index: u64::MAX.into(),
-        segment_root: SegmentRoot::default(),
-        prev_segment_header_hash: Blake3Hash::default(),
-        last_archived_block: LastArchivedBlock {
-            number: BlockNumber::MAX,
-            archived_progress: ArchivedBlockProgress::Partial(u32::MAX),
-        },
-    };
-
-    max_segment_header.encoded_size()
 }
 
 /// Removes the segment header from the start of a piece, and returns the remaining data.
@@ -82,24 +63,7 @@ pub fn strip_segment_header(
     let mut piece_data = IoReader(Cursor::new(piece_data));
 
     // Decode::decode() wants to read the entire segment here, so we have to decode it manually.
-    // In SCALE encoding, variants are always one byte.
-    let segment_variant = piece_data
-        .read_byte()
-        .map_err(|source| Error::SegmentDecoding {
-            source,
-            segment_index,
-            mapping,
-        })?;
-    // We only know how to decode variant 0.
-    if segment_variant != SEGMENT_VERSION_VARIANT {
-        return Err(Error::UnknownSegmentVariant {
-            segment_variant,
-            segment_index,
-            mapping,
-        });
-    }
-
-    // Variant 0 consists of a list of items, with no length prefix.
+    // Segment consists of a list of items, with no length prefix.
     let segment_item =
         SegmentItem::decode(&mut piece_data).map_err(|source| Error::SegmentDecoding {
             source,
@@ -156,8 +120,7 @@ pub fn strip_segment_header(
 #[cfg(test)]
 mod test {
     use super::*;
-    use parity_scale_codec::{Compact, CompactLen};
-    use subspace_archiving::archiver::Segment;
+    use parity_scale_codec::{Compact, CompactLen, DecodeAll};
 
     #[test]
     fn max_segment_padding_constant() {
@@ -168,31 +131,15 @@ mod test {
     }
 
     #[test]
-    fn segment_header_length_constants() {
-        assert!(
-            min_segment_header_encoded_size() < max_segment_header_encoded_size(),
-            "min_segment_header_encoded_size: {} must be less than max_segment_header_encoded_size: {}",
-            min_segment_header_encoded_size(),
-            max_segment_header_encoded_size()
-        );
-    }
-
-    #[test]
-    fn segment_version_variant_constant() {
-        let segment = Segment::V0 { items: Vec::new() };
-        let segment = segment.encode();
-
-        assert_eq!(segment[0], SEGMENT_VERSION_VARIANT);
-    }
-
-    #[test]
     fn block_continuation_variant_constant() {
-        let block_continuation = SegmentItem::BlockContinuation {
-            bytes: Vec::new(),
-            object_mapping: Default::default(),
-        };
-        let block_continuation = block_continuation.encode();
+        let segment_item =
+            SegmentItem::decode_all(&mut [BLOCK_CONTINUATION_VARIANT, 1, 0, 0, 0, 42].as_slice())
+                .unwrap();
 
-        assert_eq!(block_continuation[0], BLOCK_CONTINUATION_VARIANT);
+        if let SegmentItem::BlockContinuation { bytes, .. } = segment_item {
+            assert_eq!(Vec::from(bytes).as_slice(), &[42]);
+        } else {
+            panic!("Wrong `BLOCK_CONTINUATION_VARIANT` constant");
+        }
     }
 }

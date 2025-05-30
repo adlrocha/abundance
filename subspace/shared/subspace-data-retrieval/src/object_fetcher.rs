@@ -1,18 +1,16 @@
 //! Fetching objects stored in the archived history of Subspace Network.
 
 use crate::object_fetcher::partial_object::{PartialObject, RawPieceData};
-use crate::object_fetcher::segment_header::{
-    MAX_SEGMENT_PADDING, max_segment_header_encoded_size, min_segment_header_encoded_size,
-};
+use crate::object_fetcher::segment_header::{MAX_SEGMENT_PADDING, segment_header_encoded_size};
 use crate::piece_fetcher::download_pieces;
 use crate::piece_getter::PieceGetter;
+use ab_archiving::archiver::SegmentItem;
+use ab_archiving::objects::GlobalObject;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::{Piece, PieceIndex, Record};
+use ab_core_primitives::segments::{RecordedHistorySegment, SegmentIndex};
 use parity_scale_codec::{Compact, CompactLen, Decode};
 use std::sync::Arc;
-use subspace_archiving::archiver::SegmentItem;
-use subspace_archiving::objects::{GlobalObject, GlobalObjectMapping};
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pieces::{Piece, PieceIndex, Record};
-use subspace_core_primitives::segments::{RecordedHistorySegment, SegmentIndex};
 use tracing::{debug, trace, warn};
 
 mod partial_object;
@@ -44,7 +42,7 @@ pub fn max_supported_object_length() -> usize {
         - MAX_SEGMENT_PADDING
         - 1
         - 1
-        - max_segment_header_encoded_size()
+        - segment_header_encoded_size()
         - 1
         - MAX_ENCODED_LENGTH_SIZE * 2
 }
@@ -116,7 +114,7 @@ pub enum Error {
     #[error(
         "Piece offset is inside the segment header, min size of segment header: {}, object: \
         {mapping:?}",
-        min_segment_header_encoded_size()
+        segment_header_encoded_size()
     )]
     PieceOffsetInSegmentHeader { mapping: GlobalObject },
 
@@ -195,6 +193,8 @@ pub enum Error {
     },
 }
 
+// TODO: This no longer corresponds to the latest simplified archiving mechanism and needs to be
+//  rewritten
 /// Object fetcher for the Subspace DSN.
 pub struct ObjectFetcher<PG>
 where
@@ -241,14 +241,14 @@ where
     /// Checks the objects' hashes to make sure the correct bytes are returned.
     pub async fn fetch_objects(
         &self,
-        mappings: GlobalObjectMapping,
+        global_objects: Vec<GlobalObject>,
     ) -> Result<Vec<Vec<u8>>, Error> {
-        let mut objects = Vec::with_capacity(mappings.objects().len());
+        let mut objects = Vec::with_capacity(global_objects.len());
 
         // TODO:
         // - keep the last downloaded piece until it's no longer needed
         // - document sorting mappings in piece index order
-        for &mapping in mappings.objects() {
+        for mapping in global_objects {
             let GlobalObject {
                 piece_index,
                 offset,
@@ -269,10 +269,10 @@ where
 
             // We could parse each segment header to do this check perfectly, but it's an edge
             // case, so we just do a best-effort check
-            if piece_index.position() == 0 && offset < min_segment_header_encoded_size() as u32 {
+            if piece_index.position() == 0 && offset < segment_header_encoded_size() as u32 {
                 debug!(
                     ?mapping,
-                    min_segment_header_encoded_size = ?min_segment_header_encoded_size(),
+                    min_segment_header_encoded_size = ?segment_header_encoded_size(),
                     "Invalid offset for object: must not be inside the segment header",
                 );
 

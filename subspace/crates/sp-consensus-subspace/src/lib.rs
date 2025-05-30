@@ -8,17 +8,19 @@ extern crate alloc;
 pub mod digests;
 pub mod inherents;
 
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pot::{
+    PotCheckpoints, PotOutput, PotParametersChange, PotSeed, SlotDuration, SlotNumber,
+};
+use ab_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex, SegmentRoot};
+use ab_core_primitives::solutions::SolutionRange;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_runtime::{ConsensusEngineId, Justification};
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pot::{PotCheckpoints, PotOutput, PotSeed, SlotDuration, SlotNumber};
-use subspace_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex, SegmentRoot};
-use subspace_core_primitives::solutions::SolutionRange;
 
 /// The `ConsensusEngineId` of Subspace.
 const SUBSPACE_ENGINE_ID: ConsensusEngineId = *b"SUB_";
@@ -112,17 +114,6 @@ impl PotNextSlotInput {
             seed,
         }
     }
-}
-
-/// Change of parameters to apply to PoT chain
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Decode, Encode, TypeInfo, MaxEncodedLen)]
-pub struct PotParametersChange {
-    /// At which slot change of parameters takes effect
-    pub slot: SlotNumber,
-    /// New number of slot iterations
-    pub slot_iterations: NonZeroU32,
-    /// Entropy that should be injected at this time
-    pub entropy: Blake3Hash,
 }
 
 /// An consensus log item for Subspace.
@@ -264,34 +255,12 @@ impl ChainConstants {
 
 /// Proof of time parameters
 #[derive(Debug, Clone, Encode, Decode, TypeInfo, MaxEncodedLen)]
-pub enum PotParameters {
-    /// Initial version of the parameters
-    V0 {
-        /// Number of iterations for proof of time per slot, corresponds to slot that directly
-        /// follows parent block's slot and can change before slot for which block is produced
-        slot_iterations: NonZeroU32,
-        /// Optional next scheduled change of parameters
-        next_change: Option<PotParametersChange>,
-    },
-}
-
-impl PotParameters {
-    /// Number of iterations for proof of time per slot, corresponds to slot that directly follows
-    /// parent block's slot and can change before slot for which block is produced
-    pub fn slot_iterations(&self) -> NonZeroU32 {
-        let Self::V0 {
-            slot_iterations, ..
-        } = self;
-
-        *slot_iterations
-    }
-
-    /// Get next proof of time parameters change if any
-    pub fn next_parameters_change(&self) -> Option<PotParametersChange> {
-        let Self::V0 { next_change, .. } = self;
-
-        *next_change
-    }
+pub struct PotParameters {
+    /// Number of iterations for proof of time per slot, corresponds to slot that directly
+    /// follows parent block's slot and can change before slot for which block is produced
+    pub slot_iterations: NonZeroU32,
+    /// Optional next scheduled change of parameters
+    pub next_change: Option<PotParametersChange>,
 }
 
 sp_api::decl_runtime_apis! {

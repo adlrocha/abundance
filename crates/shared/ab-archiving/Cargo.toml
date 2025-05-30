@@ -1,0 +1,47 @@
+[package]
+name = "ab-archiving"
+description = "Collection of modules used for dealing with archival history"
+license = "0BSD"
+version = "0.1.0"
+authors = ["Nazar Mokrynskyi <nazar@mokrynskyi.com>"]
+edition = "2024"
+include = [
+    "/benches",
+    "/src",
+    "/Cargo.toml",
+]
+
+[lib]
+# Necessary for CLI options to work on benches
+bench = false
+
+[[bench]]
+name = "archiving"
+harness = false
+
+[dependencies]
+ab-core-primitives = { workspace = true, features = ["alloc", "scale-codec"] }
+ab-erasure-coding = { workspace = true }
+ab-merkle-tree = { workspace = true, features = ["alloc"] }
+parity-scale-codec = { workspace = true, features = ["derive"] }
+rayon = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand_core = { workspace = true }
+rand_chacha = { workspace = true }
+
+[features]
+parallel = [
+    "ab-core-primitives/parallel",
+    "dep:rayon",
+]
+serde = [
+    "ab-core-primitives/serde",
+    "dep:serde",
+]
+
+[lints]
+workspace = true

@@ -13,6 +13,11 @@
 //! This is a significant tradeoff in the protocol: having a smaller header vs being able to verify
 //! a lot of things stateless and in parallel.
 
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pot::SlotNumber;
+use ab_core_primitives::solutions::{SolutionVerifyError, SolutionVerifyParams};
+use ab_proof_of_space::Table;
 use futures::lock::Mutex;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -21,7 +26,6 @@ use sc_consensus::block_import::BlockImportParams;
 use sc_consensus::import_queue::Verifier;
 use sc_consensus_slots::check_equivocation;
 use sc_proof_of_time::verifier::PotVerifier;
-use schnorrkel::context::SigningContext;
 use sp_api::ProvideRuntimeApi;
 use sp_block_builder::BlockBuilder as BlockBuilderApi;
 use sp_blockchain::HeaderBackend;
@@ -38,12 +42,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::available_parallelism;
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pot::SlotNumber;
-use subspace_core_primitives::solutions::{SolutionVerifyError, SolutionVerifyParams};
-use subspace_proof_of_space::Table;
-use subspace_verification::check_reward_signature;
+use subspace_verification::is_reward_signature_valid;
 use tokio::runtime::Handle;
 use tracing::{debug, info, trace, warn};
 
@@ -106,8 +105,6 @@ pub struct SubspaceVerifierOptions<Client> {
     pub client: Arc<Client>,
     /// Subspace chain constants
     pub chain_constants: ChainConstants,
-    /// Context for reward signing
-    pub reward_signing_context: SigningContext,
     /// Approximate target block number for syncing purposes
     pub sync_target_block_number: Arc<AtomicU64>,
     /// Whether this node is authoring blocks
@@ -123,7 +120,6 @@ where
 {
     client: Arc<Client>,
     chain_constants: ChainConstants,
-    reward_signing_context: SigningContext,
     sync_target_block_number: Arc<AtomicU64>,
     is_authoring_blocks: bool,
     pot_verifier: PotVerifier,
@@ -145,7 +141,6 @@ where
         let SubspaceVerifierOptions {
             client,
             chain_constants,
-            reward_signing_context,
             sync_target_block_number,
             is_authoring_blocks,
             pot_verifier,
@@ -154,7 +149,6 @@ where
         Self {
             client,
             chain_constants,
-            reward_signing_context,
             sync_target_block_number,
             is_authoring_blocks,
             pot_verifier,
@@ -166,11 +160,12 @@ where
 
     /// Determine if full proof of time verification is needed for this block number
     fn full_pot_verification(&self, block_number: BlockNumber) -> bool {
-        let sync_target_block_number: BlockNumber =
-            self.sync_target_block_number.load(Ordering::Relaxed);
+        let sync_target_block_number =
+            BlockNumber::new(self.sync_target_block_number.load(Ordering::Relaxed));
         let Some(diff) = sync_target_block_number.checked_sub(block_number) else {
             return true;
         };
+        let diff = diff.as_u64();
 
         let sample_size = match diff {
             ..=1_581 => {
@@ -211,7 +206,7 @@ where
         } = params;
 
         let pre_digest = subspace_digest_items.pre_digest;
-        let slot = pre_digest.slot();
+        let slot = pre_digest.slot;
 
         let seal = header
             .digest_mut()
@@ -248,7 +243,7 @@ where
             // Last checkpoint must be our future proof of time, this is how we anchor the rest of
             // checks together
             if checkpoints.last().map(|checkpoints| checkpoints.output())
-                != Some(pre_digest.pot_info().future_proof_of_time())
+                != Some(pre_digest.pot_info.future_proof_of_time)
             {
                 return Err(VerificationError::InvalidSubspaceJustificationContents);
             }
@@ -323,20 +318,22 @@ where
         }
 
         // Verify that block is signed properly
-        if check_reward_signature(
-            pre_hash.as_ref(),
+        if !is_reward_signature_valid(
+            &Blake3Hash::new(
+                pre_hash
+                    .as_ref()
+                    .try_into()
+                    .expect("Block hash is exactly 32 bytes; qed"),
+            ),
             &signature,
-            &pre_digest.solution().public_key_hash,
-            &self.reward_signing_context,
-        )
-        .is_err()
-        {
+            &pre_digest.solution.public_key_hash,
+        ) {
             return Err(VerificationError::BadRewardSignature(pre_hash));
         }
 
         // Verify that solution is valid
         pre_digest
-            .solution()
+            .solution
             .verify::<PosTable>(slot, verify_solution_params)
             .map_err(|error| VerificationError::VerificationError(slot, error))?;
 
@@ -408,12 +405,8 @@ where
             "Verifying",
         );
 
-        let block_number = (*block.header.number()).saturated_into::<BlockNumber>();
-        let best_number = self
-            .client
-            .info()
-            .best_number
-            .saturated_into::<BlockNumber>();
+        let block_number = BlockNumber::new((*block.header.number()).saturated_into());
+        let best_number = BlockNumber::new(self.client.info().best_number.saturated_into());
         // Reject block below archiving point, but only if we received it from the network
         if block_number + self.chain_constants.confirmation_depth_k() < best_number
             && matches!(block.origin, BlockOrigin::NetworkBroadcast)
@@ -452,7 +445,7 @@ where
                 VerificationParams {
                     header: block.header.clone(),
                     verify_solution_params: &SolutionVerifyParams {
-                        proof_of_time: subspace_digest_items.pre_digest.pot_info().proof_of_time(),
+                        proof_of_time: subspace_digest_items.pre_digest.pot_info.proof_of_time,
                         solution_range: subspace_digest_items.solution_range,
                         piece_check_params: None,
                     },
@@ -469,16 +462,15 @@ where
             seal,
         } = checked_header;
 
-        let slot = pre_digest.slot();
+        let slot = pre_digest.slot;
         // Estimate what the "current" slot is according to sync target since we don't have other
         // way to know it
-        let diff_in_blocks = self
-            .sync_target_block_number
-            .load(Ordering::Relaxed)
-            .saturating_sub(block_number);
-        let slot_now = if diff_in_blocks > 0 {
+        let diff_in_blocks =
+            BlockNumber::new(self.sync_target_block_number.load(Ordering::Relaxed))
+                .saturating_sub(block_number);
+        let slot_now = if diff_in_blocks > BlockNumber::ZERO {
             slot + SlotNumber::new(
-                diff_in_blocks * self.chain_constants.slot_probability().1
+                diff_in_blocks.as_u64() * self.chain_constants.slot_probability().1
                     / self.chain_constants.slot_probability().0,
             )
         } else {
@@ -493,7 +485,7 @@ where
                 slot_now,
                 slot,
                 &block.header,
-                &pre_digest.solution().public_key_hash,
+                &pre_digest.solution.public_key_hash,
                 &block.origin,
             )
             .await

@@ -1,6 +1,16 @@
 //! Test utilities
 
 use crate::{self as pallet_subspace, AllowAuthoringBy, Config, ConsensusConstants};
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::ed25519::Ed25519PublicKey;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::PieceOffset;
+use ab_core_primitives::pot::SlotNumber;
+use ab_core_primitives::sectors::SectorIndex;
+use ab_core_primitives::segments::{
+    ArchivedBlockProgress, HistorySize, LastArchivedBlock, SegmentHeader, SegmentIndex, SegmentRoot,
+};
+use ab_core_primitives::solutions::{Solution, SolutionRange};
 use frame_support::traits::{ConstU128, OnInitialize};
 use frame_support::{derive_impl, parameter_types};
 use schnorrkel::Keypair;
@@ -10,25 +20,17 @@ use sp_runtime::BuildStorage;
 use sp_runtime::testing::{Digest, DigestItem, TestXt};
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pieces::PieceOffset;
-use subspace_core_primitives::pot::SlotNumber;
-use subspace_core_primitives::sectors::SectorIndex;
-use subspace_core_primitives::segments::{
-    ArchivedBlockProgress, HistorySize, LastArchivedBlock, SegmentHeader, SegmentIndex, SegmentRoot,
-};
-use subspace_core_primitives::solutions::{Solution, SolutionRange};
 use subspace_runtime_primitives::ConsensusEventSegmentSize;
-use subspace_verification::sr25519::PublicKey;
 
 type Block = frame_system::mocking::MockBlock<Test>;
 type Balance = u128;
 
 frame_support::construct_runtime!(
     pub struct Test {
-        System: frame_system,
-        Balances: pallet_balances,
-        Subspace: pallet_subspace,
+        System: frame_system = 0,
+        Balances: pallet_balances = 1,
+        // TODO: Should have been 3, but runtime thinks "2" is already occupied by `Void` 🤷
+        Subspace: pallet_subspace = 3,
     }
 );
 
@@ -98,15 +100,16 @@ pub fn go_to_block(keypair: &Keypair, block: u64, slot: SlotNumber) {
     let pre_digest = make_pre_digest(
         slot,
         Solution {
-            public_key_hash: PublicKey::from(keypair.public.to_bytes()).hash(),
-            sector_index: SectorIndex::ZERO,
-            history_size: HistorySize::from(SegmentIndex::ZERO),
-            piece_offset: PieceOffset::default(),
+            public_key_hash: Ed25519PublicKey::from(keypair.public.to_bytes()).hash(),
             record_root: Default::default(),
             record_proof: Default::default(),
             chunk,
             chunk_proof: Default::default(),
             proof_of_space: Default::default(),
+            history_size: HistorySize::from(SegmentIndex::ZERO),
+            sector_index: SectorIndex::ZERO,
+            piece_offset: PieceOffset::default(),
+            padding: [0; _],
         },
     );
 
@@ -126,10 +129,10 @@ pub fn progress_to_block(keypair: &Keypair, n: u64) {
 }
 
 pub fn make_pre_digest(slot: SlotNumber, solution: Solution) -> Digest {
-    let log = DigestItem::subspace_pre_digest(&PreDigest::V0 {
+    let log = DigestItem::subspace_pre_digest(&PreDigest {
         slot,
         solution,
-        pot_info: PreDigestPotInfo::V0 {
+        pot_info: PreDigestPotInfo {
             proof_of_time: Default::default(),
             future_proof_of_time: Default::default(),
         },
@@ -155,13 +158,13 @@ pub fn new_test_ext() -> TestExternalities {
 }
 
 pub fn create_segment_header(segment_index: SegmentIndex) -> SegmentHeader {
-    SegmentHeader::V0 {
-        segment_index,
+    SegmentHeader {
+        segment_index: segment_index.into(),
         segment_root: SegmentRoot::default(),
         prev_segment_header_hash: Blake3Hash::default(),
         last_archived_block: LastArchivedBlock {
-            number: 0,
-            archived_progress: ArchivedBlockProgress::Complete,
+            number: BlockNumber::ZERO.into(),
+            archived_progress: ArchivedBlockProgress::new_complete(),
         },
     }
 }

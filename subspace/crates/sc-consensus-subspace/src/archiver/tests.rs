@@ -1,11 +1,13 @@
 use crate::archiver::SegmentHeadersStore;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::segments::{
+    ArchivedBlockProgress, LastArchivedBlock, SegmentHeader, SegmentIndex,
+};
 use parking_lot::RwLock;
 use sc_client_api::AuxStore;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use subspace_core_primitives::segments::{
-    ArchivedBlockProgress, LastArchivedBlock, SegmentHeader, SegmentIndex,
-};
 
 struct MemAuxStore {
     store: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
@@ -48,59 +50,59 @@ impl AuxStore for MemAuxStore {
 
 #[test]
 fn segment_headers_store_block_number_queries_work() {
-    let confirmation_depth_k = 100;
+    let confirmation_depth_k = BlockNumber::new(100);
     let segment_headers =
         SegmentHeadersStore::new(Arc::new(MemAuxStore::new()), confirmation_depth_k).unwrap();
 
     // Several starting segments from gemini-3h
 
-    let segment_header0 = SegmentHeader::V0 {
-        segment_index: SegmentIndex::ZERO,
+    let segment_header0 = SegmentHeader {
+        segment_index: SegmentIndex::ZERO.into(),
         segment_root: Default::default(),
         prev_segment_header_hash: Default::default(),
         last_archived_block: LastArchivedBlock {
-            number: 0,
-            archived_progress: ArchivedBlockProgress::Partial(5),
+            number: BlockNumber::new(0).into(),
+            archived_progress: ArchivedBlockProgress::new_partial(NonZeroU32::new(5).unwrap()),
         },
     };
 
-    let segment_header1 = SegmentHeader::V0 {
-        segment_index: SegmentIndex::ONE,
+    let segment_header1 = SegmentHeader {
+        segment_index: SegmentIndex::ONE.into(),
         segment_root: Default::default(),
         prev_segment_header_hash: Default::default(),
         last_archived_block: LastArchivedBlock {
-            number: 652,
-            archived_progress: ArchivedBlockProgress::Partial(5),
+            number: BlockNumber::new(652).into(),
+            archived_progress: ArchivedBlockProgress::new_partial(NonZeroU32::new(5).unwrap()),
         },
     };
 
-    let segment_header2 = SegmentHeader::V0 {
-        segment_index: SegmentIndex::from(2),
+    let segment_header2 = SegmentHeader {
+        segment_index: SegmentIndex::from(2).into(),
         segment_root: Default::default(),
         prev_segment_header_hash: Default::default(),
         last_archived_block: LastArchivedBlock {
-            number: 752,
-            archived_progress: ArchivedBlockProgress::Partial(5),
+            number: BlockNumber::new(752).into(),
+            archived_progress: ArchivedBlockProgress::new_partial(NonZeroU32::new(5).unwrap()),
         },
     };
 
-    let segment_header3 = SegmentHeader::V0 {
-        segment_index: SegmentIndex::from(3),
+    let segment_header3 = SegmentHeader {
+        segment_index: SegmentIndex::from(3).into(),
         segment_root: Default::default(),
         prev_segment_header_hash: Default::default(),
         last_archived_block: LastArchivedBlock {
-            number: 806,
-            archived_progress: ArchivedBlockProgress::Partial(5),
+            number: BlockNumber::new(806).into(),
+            archived_progress: ArchivedBlockProgress::new_partial(NonZeroU32::new(5).unwrap()),
         },
     };
 
-    let segment_header4 = SegmentHeader::V0 {
-        segment_index: SegmentIndex::from(4),
+    let segment_header4 = SegmentHeader {
+        segment_index: SegmentIndex::from(4).into(),
         segment_root: Default::default(),
         prev_segment_header_hash: Default::default(),
         last_archived_block: LastArchivedBlock {
-            number: 806,
-            archived_progress: ArchivedBlockProgress::Partial(5),
+            number: BlockNumber::new(806).into(),
+            archived_progress: ArchivedBlockProgress::new_partial(NonZeroU32::new(5).unwrap()),
         },
     };
 
@@ -112,15 +114,16 @@ fn segment_headers_store_block_number_queries_work() {
     let segment_header0 = segment_headers
         .get_segment_header(SegmentIndex::ZERO)
         .unwrap();
-    let result = segment_headers.segment_headers_for_block(1);
+    let result = segment_headers.segment_headers_for_block(BlockNumber::new(1));
     assert_eq!(result, vec![segment_header0]);
 
     // Special case, genesis segment header is included in block 1, not later
-    let result = segment_headers.segment_headers_for_block(confirmation_depth_k + 1);
+    let result =
+        segment_headers.segment_headers_for_block(confirmation_depth_k + BlockNumber::new(1));
     assert_eq!(result, vec![]);
 
     for num in 2..752_u64 {
-        let result = segment_headers.segment_headers_for_block(num);
+        let result = segment_headers.segment_headers_for_block(BlockNumber::new(num));
         assert_eq!(result, vec![]);
     }
 
@@ -134,7 +137,7 @@ fn segment_headers_store_block_number_queries_work() {
         .unwrap();
 
     for num in 2..752_u64 {
-        let result = segment_headers.segment_headers_for_block(num);
+        let result = segment_headers.segment_headers_for_block(BlockNumber::new(num));
         assert_eq!(result, vec![]);
     }
 
@@ -143,12 +146,12 @@ fn segment_headers_store_block_number_queries_work() {
         .get_segment_header(SegmentIndex::ONE)
         .unwrap();
     // last archived block + confirmation depth + 1
-    let result = segment_headers.segment_headers_for_block(753);
+    let result = segment_headers.segment_headers_for_block(BlockNumber::new(753));
     assert_eq!(result, vec![segment_header1]);
 
     // No segment headers in between
     for num in 754..852_u64 {
-        let result = segment_headers.segment_headers_for_block(num);
+        let result = segment_headers.segment_headers_for_block(BlockNumber::new(num));
         assert_eq!(result, vec![]);
     }
 
@@ -156,13 +159,13 @@ fn segment_headers_store_block_number_queries_work() {
     let segment_header2 = segment_headers
         .get_segment_header(SegmentIndex::from(2))
         .unwrap();
-    let result = segment_headers.segment_headers_for_block(853);
+    let result = segment_headers.segment_headers_for_block(BlockNumber::new(853));
     assert_eq!(result, vec![segment_header2]);
 
     // End of third segment
     let segment_header3 = segment_headers
         .get_segment_header(SegmentIndex::from(3))
         .unwrap();
-    let result = segment_headers.segment_headers_for_block(907);
+    let result = segment_headers.segment_headers_for_block(BlockNumber::new(907));
     assert_eq!(result, vec![segment_header3, segment_header4]);
 }

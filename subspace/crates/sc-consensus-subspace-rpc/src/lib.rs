@@ -2,6 +2,13 @@
 
 #![feature(try_blocks)]
 
+use ab_archiving::archiver::NewArchivedSegment;
+use ab_core_primitives::block::BlockRoot;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::{Piece, PieceIndex};
+use ab_core_primitives::pot::SlotNumber;
+use ab_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
+use ab_core_primitives::solutions::Solution;
 use ab_erasure_coding::ErasureCoding;
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt, future};
@@ -27,7 +34,6 @@ use sp_api::{ApiError, ProvideRuntimeApi};
 use sp_blockchain::HeaderBackend;
 use sp_consensus::SyncOracle;
 use sp_consensus_subspace::{ChainConstants, SubspaceApi};
-use sp_core::H256;
 use sp_runtime::traits::Block as BlockT;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -35,12 +41,6 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use subspace_archiving::archiver::NewArchivedSegment;
-use subspace_core_primitives::block::BlockHash;
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
-use subspace_core_primitives::pot::SlotNumber;
-use subspace_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
-use subspace_core_primitives::solutions::Solution;
 use subspace_farmer_components::FarmerProtocolInfo;
 use subspace_networking::libp2p::Multiaddr;
 use subspace_rpc_primitives::{
@@ -146,7 +146,7 @@ struct ArchivedSegmentHeaderAcknowledgementSenders {
 
 #[derive(Default)]
 struct BlockSignatureSenders {
-    current_hash: H256,
+    current_hash: Blake3Hash,
     senders: Vec<async_oneshot::Sender<RewardSignatureResponse>>,
 }
 
@@ -218,7 +218,7 @@ where
         Arc<Mutex<ArchivedSegmentHeaderAcknowledgementSenders>>,
     next_subscription_id: AtomicU64,
     sync_oracle: SubspaceSyncOracle<SO>,
-    genesis_hash: BlockHash,
+    genesis_root: BlockRoot,
     chain_constants: ChainConstants,
     max_pieces_in_sector: u16,
     erasure_coding: ErasureCoding,
@@ -244,8 +244,12 @@ where
     pub fn new(config: SubspaceRpcConfig<Client, SO, AS>) -> Result<Self, ApiError> {
         let info = config.client.info();
         let best_hash = info.best_hash;
-        let genesis_hash = BlockHash::try_from(info.genesis_hash.as_ref())
-            .expect("Genesis hash must always be convertible into BlockHash; qed");
+        let genesis_hash = BlockRoot::new(
+            info.genesis_hash
+                .as_ref()
+                .try_into()
+                .expect("Genesis root must always be convertible into BlockRoot; qed"),
+        );
         let runtime_api = config.client.runtime_api();
         let chain_constants = runtime_api.chain_constants(best_hash)?;
         // While the number can technically change in runtime, farmer will not adjust to it on the
@@ -274,7 +278,7 @@ where
             archived_segment_acknowledgement_senders: Arc::default(),
             next_subscription_id: AtomicU64::default(),
             sync_oracle: config.sync_oracle,
-            genesis_hash,
+            genesis_root: genesis_hash,
             chain_constants,
             max_pieces_in_sector,
             erasure_coding: config.erasure_coding,
@@ -308,7 +312,7 @@ where
             };
 
             FarmerAppInfo {
-                genesis_hash: self.genesis_hash,
+                genesis_root: self.genesis_root,
                 dsn_bootstrap_nodes: self.dsn_bootstrap_nodes.clone(),
                 syncing: self.sync_oracle.is_major_syncing(),
                 farming_timeout: chain_constants
@@ -462,10 +466,10 @@ where
                 // Wait for solutions and transform proposed proof of space solutions into
                 // data structure `sc-consensus-subspace` expects
                 let forward_signature_fut = async move {
-                    if let Ok(reward_signature) = response_receiver.await {
-                        if let Some(signature) = reward_signature.signature {
-                            let _ = signature_sender.unbounded_send(signature);
-                        }
+                    if let Ok(reward_signature) = response_receiver.await
+                        && let Some(signature) = reward_signature.signature
+                    {
+                        let _ = signature_sender.unbounded_send(signature);
                     }
                 };
 
@@ -483,7 +487,7 @@ where
 
                 // This will be sent to the farmer
                 RewardSigningInfo {
-                    hash: hash.into(),
+                    hash,
                     public_key_hash,
                 }
             },
@@ -511,10 +515,10 @@ where
         //  multiple (https://github.com/paritytech/jsonrpsee/issues/452)
         let mut reward_signature_senders = reward_signature_senders.lock();
 
-        if reward_signature_senders.current_hash == reward_signature.hash.into() {
-            if let Some(mut sender) = reward_signature_senders.senders.pop() {
-                let _ = sender.send(reward_signature);
-            }
+        if reward_signature_senders.current_hash == reward_signature.hash
+            && let Some(mut sender) = reward_signature_senders.senders.pop()
+        {
+            let _ = sender.send(reward_signature);
         }
 
         Ok(())
@@ -637,12 +641,11 @@ where
                 .flatten()
         };
 
-        if let Some(sender) = maybe_sender {
-            if let Err(error) = sender.unbounded_send(()) {
-                if !error.is_closed() {
-                    warn!("Failed to acknowledge archived segment: {error}");
-                }
-            }
+        if let Some(sender) = maybe_sender
+            && let Err(error) = sender.unbounded_send(())
+            && !error.is_closed()
+        {
+            warn!("Failed to acknowledge archived segment: {error}");
         }
 
         debug!(%segment_index, "Acknowledged archived segment.");

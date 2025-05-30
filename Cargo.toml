@@ -9,52 +9,73 @@ members = [
 [workspace.dependencies]
 ab-aligned-buffer = { version = "0.0.1", path = "crates/shared/ab-aligned-buffer" }
 ab-contracts-common = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-common" }
-ab-contracts-io-type = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-io-type" }
 ab-contracts-macros = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-macros" }
 ab-contracts-macros-impl = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-macros-impl" }
 ab-contracts-standards = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-standards" }
 ab-contracts-test-utils = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-test-utils" }
-ab-contracts-trivial-type-derive = { version = "0.0.1", path = "crates/contracts/core/ab-contracts-trivial-type-derive" }
+ab-core-primitives = { version = "0.1.0", path = "crates/shared/ab-core-primitives" }
+ab-erasure-coding = { version = "0.1.0", path = "crates/shared/ab-erasure-coding" }
+ab-io-type = { version = "0.0.1", path = "crates/shared/ab-io-type" }
 ab-executor-native = { version = "0.0.1", path = "crates/execution/ab-executor-native" }
 ab-executor-slots = { version = "0.0.1", path = "crates/execution/ab-executor-slots" }
+ab-merkle-tree = { version = "0.0.1", path = "crates/shared/ab-merkle-tree" }
+ab-proof-of-space = { version = "0.1.0", path = "crates/shared/ab-proof-of-space" }
+ab-proof-of-time = { version = "0.1.0", path = "crates/shared/ab-proof-of-time" }
 ab-system-contract-address-allocator = { version = "0.0.1", path = "crates/contracts/system/ab-system-contract-address-allocator" }
 ab-system-contract-block = { version = "0.0.1", path = "crates/contracts/system/ab-system-contract-block" }
 ab-system-contract-code = { version = "0.0.1", path = "crates/contracts/system/ab-system-contract-code" }
 ab-system-contract-native-token = { version = "0.0.1", path = "crates/contracts/system/ab-system-contract-native-token" }
 ab-system-contract-simple-wallet-base = { version = "0.0.1", path = "crates/contracts/system/ab-system-contract-simple-wallet-base" }
 ab-system-contract-state = { version = "0.0.1", path = "crates/contracts/system/ab-system-contract-state" }
-ab-transaction = { version = "0.0.1", path = "crates/shared/ab-transaction" }
+ab-trivial-type-derive = { version = "0.0.1", path = "crates/shared/ab-trivial-type-derive" }
+aes = "0.9.0-pre.3"
+bech32 = { version = "0.11.0", default-features = false }
+bitvec = "1.0.1"
 blake3 = { version = "1.8.2", default-features = false }
+bytes = { version = "1.10.1", default-features = false }
+chacha20 = { version = "0.9.1", default-features = false }
 const-sha1 = { version = "0.3.0", default-features = false }
 const_format = "0.2.34"
-criterion = { version = "0.5.1", default-features = false }
+core_affinity = "0.8.3"
+cpufeatures = "0.2.17"
+criterion = { version = "0.6.0", default-features = false }
 derive_more = { version = "2.0.1", default-features = false }
+# TODO: Switch to ed25519-dalek with RFC8032 / NIST validation criteria instead once
+#  https://github.com/dalek-cryptography/curve25519-dalek/issues/626 is resolved
+ed25519-zebra = { version = "4.0.3", default-features = false }
 halfbrown = "0.3.0"
+hex = { version = "0.4.3", default-features = false }
 ident_case = "1.0.1"
 no-panic = "0.1.35"
+parity-scale-codec = { version = "3.7.5", default-features = false }
+parking_lot = "0.12.3"
 proc-macro2 = "1.0.95"
 quote = "1.0.40"
 rand_core = { version = "0.9.3", default-features = false }
 rand_chacha = { version = "0.9.0", default-features = false }
+rayon = "1.10.0"
 reed-solomon-simd = { version = "3.0.1", default-features = false }
+scale-info = { version = "2.11.6", default-features = false }
 schnorrkel = { version = "0.11.4", default-features = false }
+seq-macro = "0.3.6"
+serde = { version = "1.0.219", default-features = false }
+serde-big-array = "0.5.1"
+sha2 = { version = "0.10.9", default-features = false }
 smallvec = "1.15.0"
-syn = "2.0.100"
+spin = "0.10.0"
+syn = "2.0.101"
 take_mut = "0.2.2"
 thiserror = { version = "2.0.12", default-features = false }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 
-# The list of dependencies below (which can be both direct and indirect dependencies) are crates that are suspected to
-# be CPU-intensive. They are unlikely to require debugging (as some of their debug info might be missing) or to require
-# to be frequently recompiled. We compile these dependencies with `opt-level=3` even in "dev" mode to make "dev" mode
-# more usable.
-# The majority of these crates are cryptographic libraries.
-#
-# This list is ordered alphabetically.
+# Following libraries have a major impact on developement experience and need to be compiled with optimizations even in
+# debug builds
 [profile.dev.package]
+ab-archiving = { opt-level = 3 }
+ab-proof-of-space = { opt-level = 3 }
+ab-proof-of-time = { opt-level = 3 }
 blake3 = { opt-level = 3 }
-curve25519-dalek = { opt-level = 3 }
 reed-solomon-simd = { opt-level = 3 }
 
 [workspace.lints.rust]

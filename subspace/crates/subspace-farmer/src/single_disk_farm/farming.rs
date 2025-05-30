@@ -11,7 +11,15 @@ use crate::farm::{
 use crate::node_client::NodeClient;
 use crate::single_disk_farm::Handlers;
 use crate::single_disk_farm::metrics::SingleDiskFarmMetrics;
+use ab_core_primitives::ed25519::Ed25519PublicKey;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::Record;
+use ab_core_primitives::pos::PosSeed;
+use ab_core_primitives::sectors::SectorIndex;
+use ab_core_primitives::segments::{HistorySize, SegmentIndex};
+use ab_core_primitives::solutions::{Solution, SolutionDistance};
 use ab_erasure_coding::ErasureCoding;
+use ab_proof_of_space::{Table, TableGenerator};
 use async_lock::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -20,20 +28,12 @@ use rayon::ThreadPool;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pieces::Record;
-use subspace_core_primitives::pos::PosSeed;
-use subspace_core_primitives::sectors::SectorIndex;
-use subspace_core_primitives::segments::{HistorySize, SegmentIndex};
-use subspace_core_primitives::solutions::{Solution, SolutionDistance};
 use subspace_farmer_components::ReadAtSync;
 use subspace_farmer_components::auditing::{AuditingError, audit_plot_sync};
 use subspace_farmer_components::proving::{ProvableSolutions, ProvingError};
 use subspace_farmer_components::reading::ReadSectorRecordChunksMode;
 use subspace_farmer_components::sector::{SectorMetadata, SectorMetadataChecksummed};
-use subspace_proof_of_space::{Table, TableGenerator};
 use subspace_rpc_primitives::{SlotInfo, SolutionResponse};
-use subspace_verification::sr25519::PublicKey;
 use tracing::{Span, debug, error, info, trace, warn};
 
 /// How many non-fatal errors should happen in a row before farm is considered non-operational
@@ -197,7 +197,7 @@ pub(super) struct FarmingOptions<NC, PlotAudit> {
         dead_code,
         reason = "Reward address was removed from `Solution` and will need to be re-introduced later"
     )]
-    pub(super) reward_address: PublicKey,
+    pub(super) reward_address: Ed25519PublicKey,
     pub(super) node_client: NC,
     pub(super) plot_audit: PlotAudit,
     pub(super) sectors_metadata: Arc<AsyncRwLock<Vec<SectorMetadataChecksummed>>>,

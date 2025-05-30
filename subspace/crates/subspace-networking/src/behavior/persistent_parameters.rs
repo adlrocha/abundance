@@ -1,4 +1,5 @@
 use crate::utils::{AsyncJoinOnDrop, Handler, HandlerFn};
+use ab_core_primitives::hashes::Blake3Hash;
 use async_trait::async_trait;
 use event_listener_primitives::HandlerId;
 use fs2::FileExt;
@@ -19,7 +20,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{io, mem};
-use subspace_core_primitives::hashes::{Blake3Hash, blake3_hash};
 use thiserror::Error;
 use tokio::time::{Sleep, sleep};
 use tracing::{debug, error, trace, warn};
@@ -176,7 +176,7 @@ impl KnownPeersSlots {
         encoded_bytes.copy_from_slice(&known_peers_bytes);
         // Write checksum
         remaining_bytes[..Blake3Hash::SIZE]
-            .copy_from_slice(blake3_hash(&known_peers_bytes).as_ref());
+            .copy_from_slice(blake3::hash(&known_peers_bytes).as_bytes());
         if let Err(error) = self.a.flush() {
             warn!(%error, "Failed to flush known peers to disk");
         }
@@ -312,15 +312,15 @@ pub struct KnownPeersManager {
 
 impl Drop for KnownPeersManager {
     fn drop(&mut self) {
-        if self.cache_need_saving {
-            if let Some(known_peers_slots) = &self.known_peers_slots {
-                known_peers_slots
-                    .lock()
-                    .write_to_inactive_slot(&EncodableKnownPeers::from_cache(
-                        &self.known_peers,
-                        self.config.cache_size,
-                    ));
-            }
+        if self.cache_need_saving
+            && let Some(known_peers_slots) = &self.known_peers_slots
+        {
+            known_peers_slots
+                .lock()
+                .write_to_inactive_slot(&EncodableKnownPeers::from_cache(
+                    &self.known_peers,
+                    self.config.cache_size,
+                ));
         }
     }
 }
@@ -370,9 +370,9 @@ impl KnownPeersManager {
                     }
 
                     // Verify checksum
-                    let actual_checksum = blake3_hash(encoded_bytes);
+                    let actual_checksum = *blake3::hash(encoded_bytes).as_bytes();
                     let expected_checksum = &remaining_bytes[..Blake3Hash::SIZE];
-                    if *actual_checksum != *expected_checksum {
+                    if actual_checksum != expected_checksum {
                         debug!(
                             encoded_bytes_len = %encoded_bytes.len(),
                             actual_checksum = %hex::encode(actual_checksum),
@@ -637,24 +637,24 @@ impl KnownPeersRegistry for KnownPeersManager {
         loop {
             (&mut self.networking_parameters_save_delay).await;
 
-            if let Some(known_peers_slots) = &self.known_peers_slots {
-                if self.cache_need_saving {
-                    let known_peers =
-                        EncodableKnownPeers::from_cache(&self.known_peers, self.config.cache_size);
-                    let known_peers_slots = Arc::clone(known_peers_slots);
-                    let write_known_peers_fut =
-                        AsyncJoinOnDrop::new(tokio::task::spawn_blocking(move || {
-                            known_peers_slots
-                                .lock()
-                                .write_to_inactive_slot(&known_peers);
-                        }));
+            if let Some(known_peers_slots) = &self.known_peers_slots
+                && self.cache_need_saving
+            {
+                let known_peers =
+                    EncodableKnownPeers::from_cache(&self.known_peers, self.config.cache_size);
+                let known_peers_slots = Arc::clone(known_peers_slots);
+                let write_known_peers_fut =
+                    AsyncJoinOnDrop::new(tokio::task::spawn_blocking(move || {
+                        known_peers_slots
+                            .lock()
+                            .write_to_inactive_slot(&known_peers);
+                    }));
 
-                    if let Err(error) = write_known_peers_fut.await {
-                        error!(%error, "Failed to write known peers");
-                    }
-
-                    self.cache_need_saving = false;
+                if let Err(error) = write_known_peers_fut.await {
+                    error!(%error, "Failed to write known peers");
                 }
+
+                self.cache_need_saving = false;
             }
             self.networking_parameters_save_delay = KnownPeersManager::default_delay();
         }
@@ -689,10 +689,10 @@ pub(crate) fn remove_p2p_suffix(mut address: Multiaddr) -> Multiaddr {
 pub(crate) fn append_p2p_suffix(peer_id: PeerId, mut address: Multiaddr) -> Multiaddr {
     let last_protocol = address.pop();
 
-    if let Some(protocol) = last_protocol {
-        if !matches!(protocol, Protocol::P2p(..)) {
-            address.push(protocol)
-        }
+    if let Some(protocol) = last_protocol
+        && !matches!(protocol, Protocol::P2p(..))
+    {
+        address.push(protocol)
     }
     address.push(Protocol::P2p(peer_id));
 

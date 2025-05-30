@@ -32,12 +32,16 @@ name = "proving"
 harness = false
 
 [dependencies]
+ab-archiving = { workspace = true, features = ["parallel"] }
+ab-core-primitives = { workspace = true, features = ["parallel"] }
 ab-erasure-coding = { workspace = true }
 ab-merkle-tree = { workspace = true, features = ["alloc"] }
+ab-proof-of-space = { workspace = true, features = ["alloc", "parallel"] }
 anyhow = { workspace = true }
 async-lock = { workspace = true }
 backoff = { workspace = true, features = ["futures", "tokio"] }
 bitvec = { workspace = true }
+blake3 = { workspace = true, features = ["rayon"] }
 fs2 = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
@@ -48,10 +52,7 @@ rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 static_assertions = { workspace = true }
-subspace-archiving = { workspace = true, features = ["parallel"] }
-subspace-core-primitives = { workspace = true, features = ["parallel"] }
 subspace-data-retrieval = { workspace = true }
-subspace-proof-of-space = { workspace = true, features = ["parallel"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "parking_lot", "rt-multi-thread", "signal", "sync"] }
 tracing = { workspace = true }
@@ -62,6 +63,3 @@ winapi = "0.3.9"
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
-schnorrkel = { workspace = true }
-subspace-proof-of-space = { workspace = true }
-subspace-verification = { workspace = true }

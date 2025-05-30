@@ -1,15 +1,15 @@
-#![feature(duration_constructors, type_changing_struct_update)]
+#![feature(duration_constructors_lite, type_changing_struct_update)]
 
 mod commands;
 mod utils;
 
+use ab_proof_of_space::chia::ChiaTable;
 use clap::Parser;
 use std::path::PathBuf;
 use std::process::exit;
 use std::{fs, panic};
 use subspace_farmer::single_disk_farm::{ScrubTarget, SingleDiskFarm};
 use subspace_logging::init_logger;
-use subspace_proof_of_space::chia::ChiaTable;
 use tracing::info;
 
 #[global_allocator]

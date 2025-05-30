@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
-#![feature(array_chunks, assert_matches, portable_simd)]
+#![feature(array_chunks, assert_matches, generic_arg_infer)]
 #![warn(unused_must_use, unsafe_code, unused_variables)]
 
 extern crate alloc;
@@ -14,6 +14,12 @@ pub mod extensions;
 pub mod weights;
 
 use crate::extensions::weights::WeightInfo as ExtensionWeightInfo;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::pot::{PotParametersChange, SlotNumber};
+use ab_core_primitives::segments::{
+    ArchivedHistorySegment, HistorySize, SegmentHeader, SegmentIndex,
+};
+use ab_core_primitives::solutions::SolutionRange;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
@@ -25,19 +31,14 @@ use log::{debug, warn};
 pub use pallet::*;
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
+use sp_consensus_subspace::PotParameters;
 use sp_consensus_subspace::digests::{CompatibleDigestItem, PreDigest};
-use sp_consensus_subspace::{PotParameters, PotParametersChange};
 use sp_runtime::generic::DigestItem;
 use sp_runtime::traits::{CheckedSub, Zero};
 use sp_runtime::transaction_validity::{
     InvalidTransaction, TransactionPriority, TransactionSource, TransactionValidity,
     TransactionValidityError, ValidTransaction,
 };
-use subspace_core_primitives::pot::SlotNumber;
-use subspace_core_primitives::segments::{
-    ArchivedHistorySegment, HistorySize, SegmentHeader, SegmentIndex,
-};
-use subspace_core_primitives::solutions::SolutionRange;
 
 /// Custom origin for validated unsigned extrinsics.
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -86,6 +87,10 @@ pub struct ConsensusConstants<BlockNumber> {
 pub mod pallet {
     use crate::weights::WeightInfo;
     use crate::{ConsensusConstants, ExtensionWeightInfo, RawOrigin};
+    use ab_core_primitives::hashes::Blake3Hash;
+    use ab_core_primitives::pot::{PotCheckpoints, SlotNumber};
+    use ab_core_primitives::segments::{SegmentHeader, SegmentIndex};
+    use ab_core_primitives::solutions::SolutionRange;
     use alloc::collections::btree_map::BTreeMap;
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
@@ -95,10 +100,6 @@ pub mod pallet {
     use sp_consensus_subspace::digests::CompatibleDigestItem;
     use sp_consensus_subspace::inherents::{INHERENT_IDENTIFIER, InherentError, InherentType};
     use sp_runtime::DigestItem;
-    use subspace_core_primitives::hashes::Blake3Hash;
-    use subspace_core_primitives::pot::{PotCheckpoints, SlotNumber};
-    use subspace_core_primitives::segments::{SegmentHeader, SegmentIndex};
-    use subspace_core_primitives::solutions::SolutionRange;
 
     /// Override for next solution range adjustment
     #[derive(Debug, Encode, Decode, TypeInfo)]
@@ -274,12 +275,8 @@ pub mod pallet {
     /// Mapping from segment index to corresponding segment root of contained records.
     #[pallet::storage]
     #[pallet::getter(fn segment_root)]
-    pub(super) type SegmentRoot<T> = CountedStorageMap<
-        _,
-        Twox64Concat,
-        SegmentIndex,
-        subspace_core_primitives::segments::SegmentRoot,
-    >;
+    pub(super) type SegmentRoot<T> =
+        CountedStorageMap<_, Twox64Concat, SegmentIndex, ab_core_primitives::segments::SegmentRoot>;
 
     /// Whether the segment headers inherent has been processed in this block (temporary value).
     ///
@@ -493,7 +490,7 @@ impl<T: Config> Pallet<T> {
     pub fn history_size() -> HistorySize {
         // Chain starts with one segment plotted, even if it is not recorded in the runtime yet
         let number_of_segments = u64::from(SegmentRoot::<T>::count()).max(1);
-        HistorySize::from(NonZeroU64::new(number_of_segments).expect("Not zero; qed"))
+        HistorySize::new(NonZeroU64::new(number_of_segments).expect("Not zero; qed"))
     }
 
     fn do_initialize(block_number: BlockNumberFor<T>) {
@@ -502,13 +499,13 @@ impl<T: Config> Pallet<T> {
             .iter()
             .find_map(|s| s.as_subspace_pre_digest())
             .expect("Block must always have pre-digest");
-        let current_slot = pre_digest.slot();
+        let current_slot = pre_digest.slot;
 
         // The slot number of the current block being initialized.
-        CurrentSlot::<T>::put(pre_digest.slot());
+        CurrentSlot::<T>::put(pre_digest.slot);
 
         {
-            let farmer_public_key_hash = pre_digest.solution().public_key_hash;
+            let farmer_public_key_hash = pre_digest.solution.public_key_hash;
 
             // Optional restriction for block authoring to the root user
             if !AllowAuthoringByAnyone::<T>::get() {
@@ -588,9 +585,12 @@ impl<T: Config> Pallet<T> {
                         EraStartSlot::<T>::get().unwrap_or_default(),
                         current_slot,
                         slot_probability,
-                        era_duration
-                            .try_into()
-                            .unwrap_or_else(|_| panic!("Era duration is always within u64; qed")),
+                        BlockNumber::new(
+                            <BlockNumberFor<T> as TryInto<u64>>::try_into(era_duration)
+                                .unwrap_or_else(|_| {
+                                    panic!("Era duration is always within u64; qed")
+                                }),
+                        ),
                     );
                 };
                 solution_ranges.next.replace(next_solution_range);
@@ -644,9 +644,9 @@ impl<T: Config> Pallet<T> {
 
         if (block_number % pot_entropy_injection_interval).is_zero() {
             let current_block_entropy = pre_digest
-                .pot_info()
-                .proof_of_time()
-                .derive_pot_entropy(&pre_digest.solution().chunk);
+                .pot_info
+                .proof_of_time
+                .derive_pot_entropy(&pre_digest.solution.chunk);
             // Collect entropy every `pot_entropy_injection_interval` blocks
             entropy.insert(
                 block_number,
@@ -661,7 +661,7 @@ impl<T: Config> Pallet<T> {
                 && let Some(entropy_value) = entropy.get_mut(&entropy_source_block_number)
             {
                 let target_slot = pre_digest
-                    .slot()
+                    .slot
                     .checked_add(pot_entropy_injection_delay)
                     .unwrap_or(SlotNumber::MAX);
                 debug!(
@@ -751,14 +751,11 @@ impl<T: Config> Pallet<T> {
         );
 
         for segment_header in segment_headers {
-            SegmentRoot::<T>::insert(
-                segment_header.segment_index(),
-                segment_header.segment_root(),
-            );
+            SegmentRoot::<T>::insert(segment_header.segment_index(), segment_header.segment_root);
             // Deposit global randomness data such that light client can validate blocks later.
             frame_system::Pallet::<T>::deposit_log(DigestItem::segment_root(
                 segment_header.segment_index(),
-                segment_header.segment_root(),
+                segment_header.segment_root,
             ));
             Self::deposit_event(Event::SegmentHeaderStored { segment_header });
         }
@@ -843,7 +840,7 @@ impl<T: Config> Pallet<T> {
             }
         }
 
-        PotParameters::V0 {
+        PotParameters {
             slot_iterations: pot_slot_iterations.slot_iterations,
             next_change,
         }

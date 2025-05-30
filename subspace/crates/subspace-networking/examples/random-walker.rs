@@ -1,3 +1,4 @@
+use ab_core_primitives::pieces::PieceIndex;
 use clap::Parser;
 use futures::StreamExt;
 use futures::channel::oneshot;
@@ -9,7 +10,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use subspace_core_primitives::pieces::PieceIndex;
 use subspace_logging::init_logger;
 use subspace_networking::protocols::request_response::handlers::piece_by_index::{
     PieceByIndexRequest, PieceByIndexRequestHandler, PieceByIndexResponse,
@@ -384,10 +384,10 @@ async fn configure_dsn(
         let node_address_sender = Mutex::new(Some(node_address_sender));
 
         move |address| {
-            if matches!(address.iter().next(), Some(Protocol::Ip4(_))) {
-                if let Some(node_address_sender) = node_address_sender.lock().take() {
-                    node_address_sender.send(address.clone()).unwrap();
-                }
+            if matches!(address.iter().next(), Some(Protocol::Ip4(_)))
+                && let Some(node_address_sender) = node_address_sender.lock().take()
+            {
+                node_address_sender.send(address.clone()).unwrap();
             }
         }
     }));

@@ -22,7 +22,10 @@ use crate::sync_from_dsn::DsnPieceGetter;
 use crate::sync_from_dsn::piece_validator::SegmentRootPieceValidator;
 use crate::sync_from_dsn::snap_sync::snap_sync;
 use crate::task_spawner::SpawnTasksParams;
+use ab_core_primitives::block::{BlockNumber, BlockRoot};
+use ab_core_primitives::pot::PotSeed;
 use ab_erasure_coding::ErasureCoding;
+use ab_proof_of_space::Table;
 use async_lock::Semaphore;
 use frame_system_rpc_runtime_api::AccountNonceApi;
 use futures::channel::oneshot;
@@ -75,13 +78,10 @@ use static_assertions::const_assert;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use subspace_core_primitives::pot::PotSeed;
 use subspace_networking::libp2p::multiaddr::Protocol;
 use subspace_networking::utils::piece_provider::PieceProvider;
-use subspace_proof_of_space::Table;
 use subspace_runtime_primitives::opaque::Block;
 use subspace_runtime_primitives::{AccountId, Balance, Nonce};
-use subspace_verification::sr25519::REWARD_SIGNING_CONTEXT;
 use tokio::sync::broadcast;
 use tracing::{Instrument, debug, error, info};
 pub use utils::wait_for_block_import;
@@ -257,7 +257,16 @@ where
         .map_err(|error| ServiceError::Application(error.into()))?;
 
     let pot_verifier = PotVerifier::new(
-        PotSeed::from_genesis(client_info.genesis_hash.as_ref(), pot_external_entropy),
+        PotSeed::from_genesis(
+            &BlockRoot::new(
+                client_info
+                    .genesis_hash
+                    .as_ref()
+                    .try_into()
+                    .expect("Genesis root must always be convertible into BlockRoot; qed"),
+            ),
+            pot_external_entropy,
+        ),
         POT_VERIFIER_CACHE_SIZE,
     );
 
@@ -290,12 +299,12 @@ where
                         .header(parent_hash)?
                         .expect("Parent header must always exist when block is created; qed");
 
-                    let parent_block_number = parent_header.number;
+                    let parent_block_number = BlockNumber::new(parent_header.number);
 
                     let subspace_inherents =
                         sp_consensus_subspace::inherents::InherentDataProvider::new(
                             segment_headers_store
-                                .segment_headers_for_block(parent_block_number + 1),
+                                .segment_headers_for_block(parent_block_number + BlockNumber::ONE),
                         );
 
                     Ok((timestamp, subspace_inherents))
@@ -321,7 +330,6 @@ where
     let verifier = SubspaceVerifier::<PosTable, _, _>::new(SubspaceVerifierOptions {
         client: client.clone(),
         chain_constants,
-        reward_signing_context: schnorrkel::context::signing_context(REWARD_SIGNING_CONTEXT),
         sync_target_block_number: Arc::clone(&sync_target_block_number),
         is_authoring_blocks: config.role.is_authority(),
         pot_verifier: pot_verifier.clone(),
@@ -823,12 +831,12 @@ where
                         .header(parent_hash)?
                         .expect("Parent header must always exist when block is created; qed");
 
-                    let parent_block_number = parent_header.number;
+                    let parent_block_number = BlockNumber::new(parent_header.number);
 
                     let subspace_inherents =
                         sp_consensus_subspace::inherents::InherentDataProvider::new(
                             segment_headers_store
-                                .segment_headers_for_block(parent_block_number + 1),
+                                .segment_headers_for_block(parent_block_number + BlockNumber::ONE),
                         );
 
                     Ok((timestamp, subspace_inherents))

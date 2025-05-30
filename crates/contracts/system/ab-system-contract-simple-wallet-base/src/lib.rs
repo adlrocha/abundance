@@ -15,7 +15,6 @@
 #![feature(
     maybe_uninit_as_bytes,
     maybe_uninit_slice,
-    non_null_from_ref,
     ptr_as_ref_unchecked,
     slice_as_array,
     try_blocks,
@@ -31,10 +30,10 @@ use crate::payload::{TransactionMethodContext, TransactionPayloadDecoder};
 use crate::seal::hash_and_verify;
 use ab_contracts_common::env::{Env, MethodContext};
 use ab_contracts_common::{ContractError, MAX_TOTAL_METHOD_ARGS};
-use ab_contracts_io_type::trivial_type::TrivialType;
 use ab_contracts_macros::contract;
 use ab_contracts_standards::tx_handler::{TxHandlerPayload, TxHandlerSeal, TxHandlerSlots};
-use ab_transaction::TransactionHeader;
+use ab_core_primitives::transaction::TransactionHeader;
+use ab_io_type::trivial_type::TrivialType;
 use core::mem::MaybeUninit;
 use core::ptr;
 use schnorrkel::PublicKey;

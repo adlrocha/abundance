@@ -6,6 +6,7 @@ use crate::source::gossip::{GossipProof, PotGossipWorker, ToGossipMessage};
 use crate::source::state::{PotState, PotStateUpdateOutcome};
 use crate::source::timekeeper::{TimekeeperProof, run_timekeeper};
 use crate::verifier::PotVerifier;
+use ab_core_primitives::pot::{PotCheckpoints, SlotNumber};
 use core_affinity::CoreId;
 use derive_more::{Deref, DerefMut};
 use futures::channel::mpsc;
@@ -23,7 +24,6 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::thread;
-use subspace_core_primitives::pot::{PotCheckpoints, SlotNumber};
 use thread_priority::{ThreadPriority, set_current_thread_priority};
 use tokio::sync::broadcast;
 use tracing::{Span, debug, error, trace, warn};
@@ -102,23 +102,23 @@ where
             SlotNumber::ZERO
         } else {
             // The best one seen
-            best_pre_digest.slot() + chain_constants.block_authoring_delay()
+            best_pre_digest.slot + chain_constants.block_authoring_delay()
         };
 
         let pot_parameters = runtime_api.pot_parameters(best_hash)?;
-        let maybe_next_parameters_change = pot_parameters.next_parameters_change();
+        let maybe_next_parameters_change = pot_parameters.next_change;
 
         let pot_input = if best_header.number().is_zero() {
             PotNextSlotInput {
                 slot: parent_slot + SlotNumber::ONE,
-                slot_iterations: pot_parameters.slot_iterations(),
+                slot_iterations: pot_parameters.slot_iterations,
                 seed: pot_verifier.genesis_seed(),
             }
         } else {
             PotNextSlotInput::derive(
-                pot_parameters.slot_iterations(),
+                pot_parameters.slot_iterations,
                 parent_slot,
-                best_pre_digest.pot_info().future_proof_of_time(),
+                best_pre_digest.pot_info.future_proof_of_time,
                 &maybe_next_parameters_change,
             )
         };
@@ -352,11 +352,11 @@ where
         };
 
         let best_slot =
-            subspace_digest_items.pre_digest.slot() + self.chain_constants.block_authoring_delay();
+            subspace_digest_items.pre_digest.slot + self.chain_constants.block_authoring_delay();
         let best_proof = subspace_digest_items
             .pre_digest
-            .pot_info()
-            .future_proof_of_time();
+            .pot_info
+            .future_proof_of_time;
 
         // This will do one of 3 things depending on circumstances:
         // * if block import is ahead of timekeeper and gossip, it will update next slot input

@@ -1,0 +1,63 @@
+[package]
+name = "ab-proof-of-space"
+description = "Subspace proof of space implementation based on Chia"
+license = "0BSD"
+version = "0.1.0"
+authors = ["Nazar Mokrynskyi <nazar@mokrynskyi.com>"]
+edition = "2024"
+include = [
+    "/src",
+    "/Cargo.toml",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+# Necessary for CLI options to work on benches
+bench = false
+
+[dependencies]
+ab-core-primitives = { workspace = true }
+blake3 = { workspace = true }
+chacha20 = { workspace = true }
+derive_more = { workspace = true, features = ["full"] }
+parking_lot = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+seq-macro = { workspace = true }
+sha2 = { workspace = true, optional = true }
+spin = { workspace = true }
+
+[dev-dependencies]
+# TODO: Remove this dependency
+bitvec = { workspace = true }
+criterion = { workspace = true }
+rayon = { workspace = true }
+sha2 = { workspace = true }
+
+[[bench]]
+name = "pos"
+harness = false
+
+[features]
+default = []
+alloc = []
+std = [
+    "alloc",
+    "chacha20/std",
+    "derive_more/std",
+    # In no-std environment we use `spin`
+    "parking_lot",
+]
+# Enabling this feature exposes quality search on `chiapos` module as well as enables support for K=15..=25 (by default
+# only K=20 is exposed)
+full-chiapos = [
+    "dep:sha2",
+]
+parallel = [
+    "alloc",
+    "dep:rayon",
+]
+
+[lints]
+workspace = true

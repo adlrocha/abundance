@@ -1,17 +1,21 @@
+use ab_archiving::archiver::Archiver;
+use ab_core_primitives::ed25519::Ed25519PublicKey;
+use ab_core_primitives::pieces::PieceOffset;
+use ab_core_primitives::sectors::{SectorId, SectorIndex};
+use ab_core_primitives::segments::{HistorySize, RecordedHistorySegment};
 use ab_erasure_coding::ErasureCoding;
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use ab_proof_of_space::Table;
+use ab_proof_of_space::chia::ChiaTable;
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
 use futures::executor::block_on;
 use parking_lot::Mutex;
 use rand::prelude::*;
 use std::fs::OpenOptions;
+use std::hint::black_box;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::{env, fs, slice};
-use subspace_archiving::archiver::Archiver;
-use subspace_core_primitives::pieces::PieceOffset;
-use subspace_core_primitives::sectors::{SectorId, SectorIndex};
-use subspace_core_primitives::segments::{HistorySize, RecordedHistorySegment};
 use subspace_farmer_components::file_ext::{FileExt, OpenOptionsExt};
 use subspace_farmer_components::plotting::{
     CpuRecordsEncoder, PlotSectorOptions, PlottedSector, plot_sector,
@@ -21,9 +25,6 @@ use subspace_farmer_components::sector::{
     SectorContentsMap, SectorMetadata, SectorMetadataChecksummed, sector_size,
 };
 use subspace_farmer_components::{FarmerProtocolInfo, ReadAt, ReadAtSync};
-use subspace_proof_of_space::Table;
-use subspace_proof_of_space::chia::ChiaTable;
-use subspace_verification::sr25519::PublicKey;
 
 type PosTable = ChiaTable;
 
@@ -44,7 +45,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         .map(|sectors_count| sectors_count.parse().unwrap())
         .unwrap_or(10);
 
-    let public_key = PublicKey::default();
+    let public_key = Ed25519PublicKey::default();
     let public_key_hash = &public_key.hash();
     let sector_index = SectorIndex::ZERO;
     let mut input = RecordedHistorySegment::new_boxed();
@@ -57,20 +58,21 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             AsRef::<[u8]>::as_ref(input.as_ref()).to_vec(),
             Default::default(),
         )
+        .unwrap()
         .archived_segments
         .into_iter()
         .next()
         .unwrap();
 
     let farmer_protocol_info = FarmerProtocolInfo {
-        history_size: HistorySize::from(NonZeroU64::new(1).unwrap()),
+        history_size: HistorySize::new(NonZeroU64::new(1).unwrap()),
         max_pieces_in_sector: pieces_in_sector,
-        recent_segments: HistorySize::from(NonZeroU64::new(5).unwrap()),
+        recent_segments: HistorySize::new(NonZeroU64::new(5).unwrap()),
         recent_history_fraction: (
-            HistorySize::from(NonZeroU64::new(1).unwrap()),
-            HistorySize::from(NonZeroU64::new(10).unwrap()),
+            HistorySize::new(NonZeroU64::new(1).unwrap()),
+            HistorySize::new(NonZeroU64::new(10).unwrap()),
         ),
-        min_sector_lifetime: HistorySize::from(NonZeroU64::new(4).unwrap()),
+        min_sector_lifetime: HistorySize::new(NonZeroU64::new(4).unwrap()),
     };
 
     let sector_size = sector_size(pieces_in_sector);

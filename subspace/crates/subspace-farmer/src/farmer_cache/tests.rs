@@ -1,6 +1,9 @@
 use crate::disk_piece_cache::DiskPieceCache;
 use crate::farmer_cache::{FarmerCache, decode_piece_index_from_record_key};
 use crate::node_client::NodeClient;
+use ab_core_primitives::block::{BlockNumber, BlockRoot};
+use ab_core_primitives::pieces::{Piece, PieceIndex};
+use ab_core_primitives::segments::{HistorySize, LastArchivedBlock, SegmentHeader, SegmentIndex};
 use async_trait::async_trait;
 use futures::channel::{mpsc, oneshot};
 use futures::stream::FuturesUnordered;
@@ -13,10 +16,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
-use subspace_core_primitives::segments::{
-    HistorySize, LastArchivedBlock, SegmentHeader, SegmentIndex,
-};
 use subspace_data_retrieval::piece_getter::PieceGetter;
 use subspace_farmer_components::FarmerProtocolInfo;
 use subspace_networking::libp2p::identity;
@@ -41,7 +40,7 @@ impl NodeClient for MockNodeClient {
     async fn farmer_app_info(&self) -> anyhow::Result<FarmerAppInfo> {
         // Most of these values make no sense, but they are not used by piece cache anyway
         Ok(FarmerAppInfo {
-            genesis_hash: [0; 32],
+            genesis_root: BlockRoot::default(),
             dsn_bootstrap_nodes: Vec::new(),
             syncing: false,
             farming_timeout: Duration::default(),
@@ -52,10 +51,10 @@ impl NodeClient for MockNodeClient {
                 max_pieces_in_sector: 0,
                 recent_segments: HistorySize::from(SegmentIndex::ZERO),
                 recent_history_fraction: (
-                    HistorySize::from(NonZeroU64::new(1).unwrap()),
-                    HistorySize::from(NonZeroU64::new(10).unwrap()),
+                    HistorySize::new(NonZeroU64::new(1).unwrap()),
+                    HistorySize::new(NonZeroU64::new(10).unwrap()),
                 ),
-                min_sector_lifetime: HistorySize::from(NonZeroU64::new(4).unwrap()),
+                min_sector_lifetime: HistorySize::new(NonZeroU64::new(4).unwrap()),
             },
         })
     }
@@ -290,12 +289,12 @@ async fn basic() {
         // side effects, but acknowledgement will indicate that keep-up after initial sync has
         // finished
         {
-            let segment_header = SegmentHeader::V0 {
-                segment_index: SegmentIndex::ONE,
+            let segment_header = SegmentHeader {
+                segment_index: SegmentIndex::ONE.into(),
                 segment_root: Default::default(),
                 prev_segment_header_hash: [0; 32].into(),
                 last_archived_block: LastArchivedBlock {
-                    number: 0,
+                    number: BlockNumber::ZERO.into(),
                     archived_progress: Default::default(),
                 },
             };
@@ -350,12 +349,12 @@ async fn basic() {
         // Send two more segment headers (one is not enough because for above peer ID there are no
         // pieces for it to store)
         for segment_index in [2, 3] {
-            let segment_header = SegmentHeader::V0 {
-                segment_index: SegmentIndex::from(segment_index),
+            let segment_header = SegmentHeader {
+                segment_index: SegmentIndex::from(segment_index).into(),
                 segment_root: Default::default(),
                 prev_segment_header_hash: [0; 32].into(),
                 last_archived_block: LastArchivedBlock {
-                    number: 0,
+                    number: BlockNumber::ZERO.into(),
                     archived_progress: Default::default(),
                 },
             };

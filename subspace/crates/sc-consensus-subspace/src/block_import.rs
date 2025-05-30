@@ -14,6 +14,16 @@
 use crate::archiver::SegmentHeadersStore;
 use crate::verifier::VerificationError;
 use crate::{SubspaceLink, aux_schema, slot_worker};
+use ab_core_primitives::block::{BlockNumber, BlockWeight};
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pot::SlotNumber;
+use ab_core_primitives::sectors::SectorId;
+use ab_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
+use ab_core_primitives::solutions::{
+    SolutionDistance, SolutionRange, SolutionVerifyError, SolutionVerifyParams,
+    SolutionVerifyPieceCheckParams,
+};
+use ab_proof_of_space::Table;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use sc_client_api::BlockBackend;
@@ -35,17 +45,6 @@ use sp_runtime::traits::{Block as BlockT, Header as HeaderT, One};
 use sp_runtime::{Justifications, SaturatedConversion};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pot::SlotNumber;
-use subspace_core_primitives::sectors::SectorId;
-use subspace_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
-use subspace_core_primitives::solutions::{
-    SolutionDistance, SolutionRange, SolutionVerifyError, SolutionVerifyParams,
-    SolutionVerifyPieceCheckParams,
-};
-use subspace_proof_of_space::Table;
-use subspace_verification::calculate_block_weight;
 use tracing::warn;
 
 /// Notification with number of the block that is about to be imported and acknowledgement sender
@@ -323,7 +322,7 @@ where
 
         let pre_digest = &subspace_digest_items.pre_digest;
         if let Some(root_plot_public_key) = root_plot_public_key_hash
-            && &pre_digest.solution().public_key_hash != root_plot_public_key
+            && &pre_digest.solution.public_key_hash != root_plot_public_key
         {
             // Only root plot public key is allowed.
             return Err(Error::OnlyRootPlotPublicKeyAllowed);
@@ -334,11 +333,11 @@ where
             .header(parent_hash)?
             .ok_or(Error::ParentUnavailable(parent_hash, block_hash))?;
 
-        let parent_slot = extract_pre_digest(&parent_header).map(|d| d.slot())?;
+        let parent_slot = extract_pre_digest(&parent_header).map(|d| d.slot)?;
 
         // Make sure that slot number is strictly increasing
-        if pre_digest.slot() <= parent_slot {
-            return Err(Error::SlotMustIncrease(parent_slot, pre_digest.slot()));
+        if pre_digest.slot <= parent_slot {
+            return Err(Error::SlotMustIncrease(parent_slot, pre_digest.slot));
         }
 
         let parent_subspace_digest_items = if block_number.is_one() {
@@ -385,7 +384,7 @@ where
             let SubspaceJustification::PotCheckpoints { seed, checkpoints } =
                 subspace_justification;
 
-            let future_slot = pre_digest.slot() + chain_constants.block_authoring_delay();
+            let future_slot = pre_digest.slot + chain_constants.block_authoring_delay();
 
             if block_number.is_one() {
                 // In case of first block seed must match genesis seed
@@ -409,8 +408,8 @@ where
                     parent_future_slot,
                     parent_subspace_digest_items
                         .pre_digest
-                        .pot_info()
-                        .future_proof_of_time(),
+                        .pot_info
+                        .future_proof_of_time,
                     &subspace_digest_items.pot_parameters_change,
                 );
 
@@ -426,9 +425,9 @@ where
         }
 
         let sector_id = SectorId::new(
-            &pre_digest.solution().public_key_hash,
-            pre_digest.solution().sector_index,
-            pre_digest.solution().history_size,
+            &pre_digest.solution.public_key_hash,
+            pre_digest.solution.sector_index,
+            pre_digest.solution.history_size,
         );
 
         let max_pieces_in_sector = self
@@ -436,8 +435,8 @@ where
             .runtime_api()
             .max_pieces_in_sector(parent_hash)?;
         let piece_index = sector_id.derive_piece_index(
-            pre_digest.solution().piece_offset,
-            pre_digest.solution().history_size,
+            pre_digest.solution.piece_offset,
+            pre_digest.solution.history_size,
             max_pieces_in_sector,
             chain_constants.recent_segments(),
             chain_constants.recent_history_fraction(),
@@ -447,7 +446,7 @@ where
         let segment_root = self
             .segment_headers_store
             .get_segment_header(segment_index)
-            .map(|segment_header| segment_header.segment_root())
+            .map(|segment_header| segment_header.segment_root)
             .ok_or(Error::SegmentRootNotFound(segment_index))?;
 
         let sector_expiration_check_segment_root = self
@@ -455,23 +454,23 @@ where
             .get_segment_header(
                 subspace_digest_items
                     .pre_digest
-                    .solution()
+                    .solution
                     .history_size
                     .sector_expiration_check(chain_constants.min_sector_lifetime())
                     .ok_or(Error::InvalidHistorySize)?
                     .segment_index(),
             )
-            .map(|segment_header| segment_header.segment_root());
+            .map(|segment_header| segment_header.segment_root);
 
         // Piece is not checked during initial block verification because it requires access to
         // segment header and runtime, check it now.
         pre_digest
-            .solution()
+            .solution
             .verify::<PosTable>(
                 // Slot was already checked during initial block verification
-                pre_digest.slot(),
+                pre_digest.slot,
                 &SolutionVerifyParams {
-                    proof_of_time: subspace_digest_items.pre_digest.pot_info().proof_of_time(),
+                    proof_of_time: subspace_digest_items.pre_digest.pot_info.proof_of_time,
                     solution_range: subspace_digest_items.solution_range,
                     piece_check_params: Some(SolutionVerifyPieceCheckParams {
                         max_pieces_in_sector,
@@ -487,7 +486,7 @@ where
                     }),
                 },
             )
-            .map_err(|error| VerificationError::VerificationError(pre_digest.slot(), error))?;
+            .map_err(|error| VerificationError::VerificationError(pre_digest.slot, error))?;
 
         // If the body is passed through, we need to use the runtime to check that the
         // internally-set timestamp in the inherents actually matches the slot set in the seal
@@ -552,7 +551,7 @@ where
         mut block: BlockImportParams<Block>,
     ) -> Result<ImportResult, Self::Error> {
         let block_hash = block.post_hash();
-        let block_number = (*block.header.number()).saturated_into::<BlockNumber>();
+        let block_number = BlockNumber::new((*block.header.number()).saturated_into());
 
         // Early exit if block already in chain
         match self.client.status(block_hash)? {
@@ -590,8 +589,8 @@ where
             .await?;
         }
 
-        let parent_weight = if block_number.is_one() {
-            0
+        let parent_weight = if block_number == BlockNumber::ONE {
+            BlockWeight::ZERO
         } else {
             // Parent block weight might be missing in special sync modes where block is imported in
             // the middle of the blockchain history directly
@@ -599,7 +598,7 @@ where
                 .unwrap_or_default()
         };
 
-        let added_weight = calculate_block_weight(subspace_digest_items.solution_range);
+        let added_weight = BlockWeight::from_solution_range(subspace_digest_items.solution_range);
         let total_weight = parent_weight + added_weight;
 
         aux_schema::write_block_weight(block_hash, total_weight, |values| {
@@ -613,7 +612,7 @@ where
                 .segment_headers_store
                 .get_segment_header(segment_index)
                 .ok_or_else(|| Error::SegmentHeaderNotFound(segment_index))?
-                .segment_root();
+                .segment_root;
 
             if &found_segment_root != segment_root {
                 warn!(

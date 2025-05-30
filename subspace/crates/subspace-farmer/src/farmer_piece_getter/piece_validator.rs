@@ -1,8 +1,8 @@
 //! Farmer-specific validator for pieces retrieved from the network
 
 use crate::node_client::NodeClient;
+use ab_core_primitives::pieces::{Piece, PieceIndex};
 use async_trait::async_trait;
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
 use subspace_networking::Node;
 use subspace_networking::libp2p::PeerId;
 use subspace_networking::utils::piece_provider::PieceValidator;
@@ -57,7 +57,7 @@ where
         };
 
         let segment_root = match segment_headers.into_iter().next().flatten() {
-            Some(segment_header) => segment_header.segment_root(),
+            Some(segment_header) => segment_header.segment_root,
             None => {
                 error!(
                     %piece_index,

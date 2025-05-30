@@ -5,6 +5,9 @@ pub(crate) mod snap_sync;
 
 use crate::sync_from_dsn::import_blocks::import_blocks_from_dsn;
 use crate::sync_from_dsn::segment_header_downloader::SegmentHeaderDownloader;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::pieces::{Piece, PieceIndex};
+use ab_core_primitives::segments::SegmentIndex;
 use ab_erasure_coding::ErasureCoding;
 use async_trait::async_trait;
 use futures::channel::mpsc;
@@ -24,9 +27,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
-use subspace_core_primitives::segments::SegmentIndex;
 use subspace_data_retrieval::piece_getter::PieceGetter;
 use subspace_networking::Node;
 use subspace_networking::utils::piece_provider::{PieceProvider, PieceValidator};
@@ -305,7 +305,7 @@ where
     let mut last_processed_segment_index = SegmentIndex::ZERO;
     // TODO: We'll be able to just take finalized block once we are able to decouple pruning from
     //  finality: https://github.com/paritytech/polkadot-sdk/issues/1570
-    let mut last_processed_block_number = info.best_number.saturated_into::<BlockNumber>();
+    let mut last_processed_block_number = BlockNumber::new(info.best_number.saturated_into());
     let segment_header_downloader = SegmentHeaderDownloader::new(node);
 
     while let Some(reason) = notifications.next().await {
@@ -313,7 +313,7 @@ where
 
         info!(?reason, "Received notification to sync from DSN");
         // TODO: Maybe handle failed block imports, additional helpful logging
-        let import_froms_from_dsn_fut = import_blocks_from_dsn(
+        let import_blocks_from_dsn_fut = import_blocks_from_dsn(
             &segment_headers_store,
             &segment_header_downloader,
             client,
@@ -328,12 +328,13 @@ where
                 tokio::time::sleep(CHECK_ALMOST_SYNCED_INTERVAL).await;
 
                 let info = client.info();
-                let target_block_number = sync_target_block_number.load(Ordering::Relaxed);
+                let target_block_number =
+                    BlockNumber::new(sync_target_block_number.load(Ordering::Relaxed));
 
                 // If less blocks than confirmation depth to the tip of the chain, no need to worry about DSN sync
                 // anymore, it will not be helpful anyway
                 if target_block_number
-                    .checked_sub(info.best_number.saturated_into::<BlockNumber>())
+                    .checked_sub(BlockNumber::new(info.best_number.saturated_into()))
                     .map(|diff| diff < chain_constants.confirmation_depth_k())
                     .unwrap_or_default()
                 {
@@ -343,7 +344,7 @@ where
         };
 
         select! {
-            result = import_froms_from_dsn_fut.fuse() => {
+            result = import_blocks_from_dsn_fut.fuse() => {
                 if let Err(error) = result {
                     warn!(%error, "Error when syncing blocks from DSN");
                 }

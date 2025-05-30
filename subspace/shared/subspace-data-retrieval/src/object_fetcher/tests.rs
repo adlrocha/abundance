@@ -2,13 +2,14 @@
 
 use super::*;
 use crate::object_fetcher::partial_object::PADDING_BYTE_VALUE;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::segments::{
+    ArchivedBlockProgress, ArchivedHistorySegment, LastArchivedBlock, SegmentHeader, SegmentRoot,
+};
 use parity_scale_codec::{Compact, CompactLen, Encode};
 use rand::{RngCore, thread_rng};
 use std::iter;
-use subspace_core_primitives::hashes::blake3_hash;
-use subspace_core_primitives::segments::{
-    ArchivedBlockProgress, ArchivedHistorySegment, LastArchivedBlock, SegmentHeader, SegmentRoot,
-};
+use std::num::NonZeroU32;
 use subspace_logging::init_logger;
 
 /// Returns a piece filled with random data.
@@ -81,16 +82,16 @@ fn write_segment_header(mut piece: &mut Piece, remaining_len: usize) -> Vec<u8> 
     let segment_prefix_len = {
         let mut raw_data = extract_raw_data_mut(vec![&mut piece]);
 
-        // Segment::V0 and SegmentItem::ParentSegmentHeader(_) variants
-        let segment_variants = [0_u8, 4_u8];
+        // SegmentItem::ParentSegmentHeader(_) variant
+        let segment_variants = [4_u8];
         // SegmentHeader
-        let segment_header = SegmentHeader::V0 {
-            segment_index: u64::MAX.into(),
+        let segment_header = SegmentHeader {
+            segment_index: SegmentIndex::new(u64::MAX).into(),
             segment_root: SegmentRoot::default(),
             prev_segment_header_hash: Blake3Hash::default(),
             last_archived_block: LastArchivedBlock {
-                number: u64::MAX,
-                archived_progress: ArchivedBlockProgress::Partial(u32::MAX),
+                number: BlockNumber::MAX.into(),
+                archived_progress: ArchivedBlockProgress::new_partial(NonZeroU32::MAX),
             },
         }
         .encode();
@@ -319,7 +320,7 @@ fn create_mapping(
         GlobalObject {
             piece_index: PieceIndex::from(start_piece_index as u64),
             offset: offset as u32,
-            hash: blake3_hash(&object_data),
+            hash: blake3::hash(&object_data).into(),
         },
         object_data,
     )
@@ -392,7 +393,7 @@ async fn get_single_piece_object_no_padding() {
 
     // Set up the test case
     // - start of segment, offset already excludes segment header
-    let offset = max_segment_header_encoded_size() + 1;
+    let offset = segment_header_encoded_size() + 1;
     let object_len = 100;
     let piece_index = 0;
 
@@ -653,8 +654,7 @@ async fn get_multi_piece_object_length_outside_padding() {
     // Leave space for the block and object lengths, segment header data, and segment, header, and
     // block enum variants. Strictly we want compact_encoded(object_len) here, but it doesn't
     // change the encoded size in practice.
-    let overhead =
-        2 * compact_encoded(4 * Record::SIZE).len() + max_segment_header_encoded_size() + 3;
+    let overhead = 2 * compact_encoded(4 * Record::SIZE).len() + segment_header_encoded_size() + 3;
     let object_len = 4 * Record::SIZE - overhead;
     let offset = 0;
     let start_piece_index = RecordedHistorySegment::NUM_RAW_RECORDS - 2;
@@ -689,7 +689,7 @@ async fn get_multi_piece_object_length_outside_padding() {
     // change the encoded size in practice.
     let skip_padding = MAX_SEGMENT_PADDING;
     let overhead = 2 * compact_encoded(6 * Record::SIZE).len()
-        + max_segment_header_encoded_size()
+        + segment_header_encoded_size()
         + 3
         + skip_padding;
     let object_len = 6 * Record::SIZE - overhead;

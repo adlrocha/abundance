@@ -1,20 +1,20 @@
 //! Subspace chain configurations.
 
 use crate::chain_spec_utils::{chain_spec_properties, get_account_id_from_seed};
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::ed25519::Ed25519PublicKey;
+use ab_core_primitives::pot::PotKey;
+use ab_core_primitives::solutions::SolutionRange;
 use sc_chain_spec::GenericChainSpec;
 use sc_service::ChainType;
 use sp_core::crypto::Ss58Codec;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::pot::PotKey;
-use subspace_core_primitives::solutions::SolutionRange;
 use subspace_runtime::{
     AllowAuthoringBy, BalancesConfig, RuntimeConfigsConfig, RuntimeGenesisConfig, SubspaceConfig,
     SudoConfig, SystemConfig, WASM_BINARY,
 };
 use subspace_runtime_primitives::{AccountId, Balance, SLOT_PROBABILITY, SSC};
-use subspace_verification::sr25519::PublicKey;
 
 // We assume initial plot size starts with a single sector.
 const INITIAL_SOLUTION_RANGE: SolutionRange = SolutionRange::from_pieces(1000, SLOT_PROBABILITY);
@@ -57,7 +57,7 @@ pub fn mainnet_compiled() -> Result<GenericChainSpec, String> {
             balances,
             GenesisParams {
                 allow_authoring_by: AllowAuthoringBy::RootFarmer(
-                    PublicKey::from(hex_literal::hex!(
+                    Ed25519PublicKey::from(hex_literal::hex!(
                         "e6a489dab63b650cf475431fc46649f4256167443fea241fca0bb3f86b29837a"
                     ))
                     .hash(),
@@ -67,7 +67,7 @@ pub fn mainnet_compiled() -> Result<GenericChainSpec, String> {
                 pot_slot_iterations: NonZeroU32::new(206_557_520).expect("Not zero; qed"),
                 enable_dynamic_cost_of_storage: false,
                 // TODO: Proper value here
-                confirmation_depth_k: 100,
+                confirmation_depth_k: BlockNumber::new(100),
             },
         )?)
         .map_err(|error| format!("Failed to serialize genesis config: {error}"))?
@@ -106,7 +106,7 @@ pub fn devnet_config_compiled() -> Result<GenericChainSpec, String> {
                 pot_slot_iterations: NonZeroU32::new(150_000_000).expect("Not zero; qed"),
                 enable_dynamic_cost_of_storage: false,
                 // TODO: Proper value here
-                confirmation_depth_k: 100,
+                confirmation_depth_k: BlockNumber::new(100),
             },
         )?)
         .map_err(|error| format!("Failed to serialize genesis config: {error}"))?
@@ -145,7 +145,7 @@ pub fn dev_config() -> Result<GenericChainSpec, String> {
                     allow_authoring_by: AllowAuthoringBy::Anyone,
                     pot_slot_iterations: NonZeroU32::new(100_000_000).expect("Not zero; qed"),
                     enable_dynamic_cost_of_storage: false,
-                    confirmation_depth_k: 5,
+                    confirmation_depth_k: BlockNumber::new(5),
                 },
             )?)
             .map_err(|error| format!("Failed to serialize genesis config: {error}"))?,
@@ -182,7 +182,7 @@ fn subspace_genesis_config(
         },
         runtime_configs: RuntimeConfigsConfig {
             enable_dynamic_cost_of_storage,
-            confirmation_depth_k,
+            confirmation_depth_k: confirmation_depth_k.as_u64(),
         },
     })
 }

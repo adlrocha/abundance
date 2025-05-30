@@ -17,6 +17,15 @@
 
 use crate::SubspaceLink;
 use crate::archiver::SegmentHeadersStore;
+use ab_core_primitives::block::BlockNumber;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pot::{PotCheckpoints, PotOutput, SlotNumber};
+use ab_core_primitives::sectors::SectorId;
+use ab_core_primitives::solutions::{
+    Solution, SolutionRange, SolutionVerifyError, SolutionVerifyParams,
+    SolutionVerifyPieceCheckParams,
+};
+use ab_proof_of_space::Table;
 use futures::channel::mpsc;
 use futures::{StreamExt, TryFutureExt};
 use sc_client_api::AuxStore;
@@ -29,7 +38,6 @@ use sc_proof_of_time::PotSlotWorker;
 use sc_proof_of_time::verifier::PotVerifier;
 use sc_telemetry::TelemetryHandle;
 use sc_utils::mpsc::{TracingUnboundedSender, tracing_unbounded};
-use schnorrkel::context::SigningContext;
 use sp_api::{ApiError, ProvideRuntimeApi};
 use sp_blockchain::{Error as ClientError, HeaderBackend, HeaderMetadata};
 use sp_consensus::{BlockOrigin, Environment, Error as ConsensusError, Proposer, SyncOracle};
@@ -38,7 +46,6 @@ use sp_consensus_subspace::digests::{
     CompatibleDigestItem, PreDigest, PreDigestPotInfo, extract_pre_digest,
 };
 use sp_consensus_subspace::{PotNextSlotInput, SubspaceApi, SubspaceJustification};
-use sp_core::H256;
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor, Zero};
 use sp_runtime::{DigestItem, Justification, Justifications};
 use std::collections::BTreeMap;
@@ -47,17 +54,8 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use subspace_core_primitives::block::BlockNumber;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pot::{PotCheckpoints, PotOutput, SlotNumber};
-use subspace_core_primitives::sectors::SectorId;
-use subspace_core_primitives::solutions::{
-    Solution, SolutionRange, SolutionVerifyError, SolutionVerifyParams,
-    SolutionVerifyPieceCheckParams,
-};
-use subspace_proof_of_space::Table;
-use subspace_verification::check_reward_signature;
-use subspace_verification::sr25519::{REWARD_SIGNING_CONTEXT, RewardSignature};
+use subspace_verification::ed25519::RewardSignature;
+use subspace_verification::is_reward_signature_valid;
 use tracing::{debug, error, info, warn};
 
 /// Large enough size for any practical purposes, there shouldn't be even this many solutions.
@@ -138,7 +136,7 @@ pub struct NewSlotNotification {
 #[derive(Debug, Clone)]
 pub struct RewardSigningNotification {
     /// Hash to be signed.
-    pub hash: H256,
+    pub hash: Blake3Hash,
     /// Public key hash of the plot identity that should create signature.
     pub public_key_hash: Blake3Hash,
     /// Sender that can be used to send signature for the header.
@@ -198,7 +196,6 @@ where
     force_authoring: bool,
     backoff_authoring_blocks: Option<BS>,
     subspace_link: SubspaceLink,
-    reward_signing_context: SigningContext,
     block_proposal_slot_portion: SlotProportion,
     max_block_proposal_slot_portion: Option<SlotProportion>,
     segment_headers_store: SegmentHeadersStore<AS>,
@@ -355,7 +352,7 @@ where
                 return None;
             }
         };
-        let parent_slot = parent_pre_digest.slot();
+        let parent_slot = parent_pre_digest.slot;
 
         if slot <= parent_slot {
             debug!(
@@ -398,15 +395,15 @@ where
             let pot_input = if parent_header.number().is_zero() {
                 PotNextSlotInput {
                     slot: parent_slot + SlotNumber::ONE,
-                    slot_iterations: parent_pot_parameters.slot_iterations(),
+                    slot_iterations: parent_pot_parameters.slot_iterations,
                     seed: self.pot_verifier.genesis_seed(),
                 }
             } else {
                 PotNextSlotInput::derive(
-                    parent_pot_parameters.slot_iterations(),
+                    parent_pot_parameters.slot_iterations,
                     parent_slot,
-                    parent_pre_digest.pot_info().proof_of_time(),
-                    &parent_pot_parameters.next_parameters_change(),
+                    parent_pre_digest.pot_info.proof_of_time,
+                    &parent_pot_parameters.next_change,
                 )
             };
 
@@ -415,7 +412,7 @@ where
                 pot_input,
                 slot - parent_slot,
                 proof_of_time,
-                parent_pot_parameters.next_parameters_change(),
+                parent_pot_parameters.next_change,
             ) {
                 warn!(
                     %slot,
@@ -429,17 +426,15 @@ where
             let mut checkpoints_pot_input = if parent_header.number().is_zero() {
                 PotNextSlotInput {
                     slot: parent_slot + SlotNumber::ONE,
-                    slot_iterations: parent_pot_parameters.slot_iterations(),
+                    slot_iterations: parent_pot_parameters.slot_iterations,
                     seed: self.pot_verifier.genesis_seed(),
                 }
             } else {
-                let parent_pot_info = parent_pre_digest.pot_info();
-
                 PotNextSlotInput::derive(
-                    parent_pot_parameters.slot_iterations(),
+                    parent_pot_parameters.slot_iterations,
                     parent_future_slot,
-                    parent_pot_info.future_proof_of_time(),
-                    &parent_pot_parameters.next_parameters_change(),
+                    parent_pre_digest.pot_info.future_proof_of_time,
+                    &parent_pot_parameters.next_change,
                 )
             };
             let seed = checkpoints_pot_input.seed;
@@ -463,7 +458,7 @@ where
                     checkpoints_pot_input.slot_iterations,
                     slot,
                     slot_checkpoints.output(),
-                    &parent_pot_parameters.next_parameters_change(),
+                    &parent_pot_parameters.next_change,
                 );
             }
 
@@ -520,7 +515,7 @@ where
             let maybe_segment_root = self
                 .segment_headers_store
                 .get_segment_header(segment_index)
-                .map(|segment_header| segment_header.segment_root());
+                .map(|segment_header| segment_header.segment_root);
 
             let segment_root = match maybe_segment_root {
                 Some(segment_root) => segment_root,
@@ -567,10 +562,10 @@ where
                 Ok(()) => {
                     if maybe_pre_digest.is_none() {
                         info!(%slot, "🚜 Claimed block at slot");
-                        maybe_pre_digest.replace(PreDigest::V0 {
+                        maybe_pre_digest.replace(PreDigest {
                             slot,
                             solution,
-                            pot_info: PreDigestPotInfo::V0 {
+                            pot_info: PreDigestPotInfo {
                                 proof_of_time,
                                 future_proof_of_time,
                             },
@@ -637,8 +632,13 @@ where
     ) -> Result<BlockImportParams<Block>, ConsensusError> {
         let signature = self
             .sign_reward(
-                H256::from_slice(header_hash.as_ref()),
-                pre_digest.solution().public_key_hash,
+                Blake3Hash::new(
+                    header_hash
+                        .as_ref()
+                        .try_into()
+                        .expect("Block hash is exactly 32 bytes; qed"),
+                ),
+                pre_digest.solution.public_key_hash,
             )
             .await?;
 
@@ -662,7 +662,7 @@ where
 
     fn should_backoff(&self, slot: Slot, chain_head: &Block::Header) -> bool {
         if let Some(strategy) = &self.backoff_authoring_blocks
-            && let Ok(chain_head_slot) = extract_pre_digest(chain_head).map(|digest| digest.slot())
+            && let Ok(chain_head_slot) = extract_pre_digest(chain_head).map(|digest| digest.slot)
         {
             return strategy.should_backoff(
                 *chain_head.number(),
@@ -698,7 +698,7 @@ where
     fn proposing_remaining_duration(&self, slot_info: &SlotInfo<Block>) -> std::time::Duration {
         let parent_slot = extract_pre_digest(&slot_info.chain_head)
             .ok()
-            .map(|d| d.slot());
+            .map(|d| d.slot);
 
         sc_consensus_slots::proposing_remaining_duration(
             parent_slot.map(|parent_slot| Slot::from(parent_slot.as_u64())),
@@ -757,7 +757,6 @@ where
             force_authoring,
             backoff_authoring_blocks,
             subspace_link,
-            reward_signing_context: schnorrkel::context::signing_context(REWARD_SIGNING_CONTEXT),
             block_proposal_slot_portion,
             max_block_proposal_slot_portion,
             segment_headers_store,
@@ -770,7 +769,7 @@ where
 
     async fn sign_reward(
         &self,
-        hash: H256,
+        hash: Blake3Hash,
         public_key_hash: Blake3Hash,
     ) -> Result<RewardSignature, ConsensusError> {
         let (signature_sender, mut signature_receiver) =
@@ -785,14 +784,7 @@ where
             });
 
         while let Some(signature) = signature_receiver.next().await {
-            if check_reward_signature(
-                hash.as_ref(),
-                &signature,
-                &public_key_hash,
-                &self.reward_signing_context,
-            )
-            .is_err()
-            {
+            if !is_reward_signature_valid(&hash, &signature, &public_key_hash) {
                 warn!(
                     %hash,
                     "Received invalid signature for reward"

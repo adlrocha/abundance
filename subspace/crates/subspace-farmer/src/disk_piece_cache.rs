@@ -9,6 +9,8 @@ use crate::farm;
 use crate::farm::{FarmError, PieceCacheId, PieceCacheOffset};
 use crate::single_disk_farm::direct_io_file::{DISK_SECTOR_SIZE, DirectIoFile};
 use crate::utils::AsyncJoinOnDrop;
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::{Piece, PieceIndex};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures::channel::mpsc;
@@ -21,8 +23,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::Poll;
 use std::{fs, io};
-use subspace_core_primitives::hashes::{Blake3Hash, blake3_hash_list};
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
 use subspace_farmer_components::file_ext::FileExt;
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -375,7 +375,15 @@ impl DiskPieceCache {
         let mut bytes = Vec::with_capacity(PieceIndex::SIZE + piece.len() + Blake3Hash::SIZE);
         bytes.extend_from_slice(&piece_index_bytes);
         bytes.extend_from_slice(piece.as_ref());
-        bytes.extend_from_slice(blake3_hash_list(&[&piece_index_bytes, piece.as_ref()]).as_ref());
+        bytes.extend_from_slice(
+            {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&piece_index_bytes);
+                hasher.update(piece.as_ref());
+                hasher.finalize()
+            }
+            .as_bytes(),
+        );
         self.inner
             .files
             .write()
@@ -457,8 +465,13 @@ impl DiskPieceCache {
         let (piece_bytes, expected_checksum) = remaining_bytes.split_at(Piece::SIZE);
 
         // Verify checksum
-        let actual_checksum = blake3_hash_list(&[piece_index_bytes, piece_bytes]);
-        if *actual_checksum != *expected_checksum {
+        let actual_checksum = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(piece_index_bytes);
+            hasher.update(piece_bytes);
+            *hasher.finalize().as_bytes()
+        };
+        if actual_checksum != expected_checksum {
             if element.iter().all(|&byte| byte == 0) {
                 return Ok(None);
             }

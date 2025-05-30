@@ -13,6 +13,8 @@ readme = "README.md"
 targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
+ab-archiving = { workspace = true }
+ab-core-primitives = { workspace = true }
 ab-erasure-coding = { workspace = true }
 async-oneshot = { workspace = true }
 futures = { workspace = true }
@@ -30,10 +32,7 @@ sp-api = { workspace = true }
 sp-consensus = { workspace = true }
 sp-consensus-subspace = { workspace = true }
 sp-blockchain = { workspace = true }
-sp-core = { workspace = true }
 sp-runtime = { workspace = true }
-subspace-archiving = { workspace = true }
-subspace-core-primitives = { workspace = true }
 subspace-farmer-components = { workspace = true }
 subspace-networking = { workspace = true }
 subspace-rpc-primitives = { workspace = true }

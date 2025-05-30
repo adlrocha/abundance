@@ -9,6 +9,7 @@ use crate::protocols::request_response::handlers::piece_by_index::{
 };
 use crate::utils::multihash::ToMultihash;
 use crate::{Multihash, Node};
+use ab_core_primitives::pieces::{Piece, PieceIndex};
 use async_lock::{Semaphore, SemaphoreGuard};
 use async_trait::async_trait;
 use futures::channel::mpsc;
@@ -26,7 +27,6 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
 use tokio_stream::StreamMap;
 use tracing::{Instrument, debug, trace, warn};
 
@@ -144,7 +144,7 @@ where
     pub async fn get_piece_from_cache(&self, piece_index: PieceIndex) -> Option<Piece> {
         let key = RecordKey::from(piece_index.to_multihash());
 
-        let mut request_batch = self.node.get_requests_batch_handle().await;
+        let request_batch = self.node.get_requests_batch_handle().await;
         let mut get_providers_stream = request_batch
             .get_providers(key.clone())
             .await
@@ -320,7 +320,7 @@ where
         // Random walk key
         let key = PeerId::random();
 
-        let mut request_batch = self.node.get_requests_batch_handle().await;
+        let request_batch = self.node.get_requests_batch_handle().await;
         let mut get_closest_peers_stream = request_batch
             .get_closest_peers(key.into())
             .await

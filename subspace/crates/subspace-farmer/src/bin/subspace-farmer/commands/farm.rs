@@ -1,7 +1,9 @@
 use crate::commands::shared::network::{NetworkArgs, configure_network};
 use crate::commands::shared::{DiskFarm, PlottingThreadPriority, derive_libp2p_keypair};
 use crate::utils::shutdown_signal;
+use ab_core_primitives::ed25519::Ed25519PublicKey;
 use ab_erasure_coding::ErasureCoding;
+use ab_proof_of_space::Table;
 use anyhow::anyhow;
 use async_lock::{Mutex as AsyncMutex, RwLock as AsyncRwLock, Semaphore};
 use backoff::ExponentialBackoff;
@@ -50,8 +52,6 @@ use subspace_farmer::utils::{
 use subspace_farmer_components::reading::ReadSectorRecordChunksMode;
 use subspace_metrics::{RegistryAdapter, start_prometheus_metrics_server};
 use subspace_networking::utils::piece_provider::PieceProvider;
-use subspace_proof_of_space::Table;
-use subspace_verification::sr25519::PublicKey;
 use tracing::{Instrument, error, info, info_span, warn};
 
 /// Get piece retry attempts number.
@@ -202,7 +202,7 @@ pub(crate) struct FarmingArgs {
     node_rpc_url: String,
     /// Address for farming rewards
     #[arg(long, value_parser = parse_ss58_reward_address)]
-    reward_address: Option<PublicKey>,
+    reward_address: Option<Ed25519PublicKey>,
     /// Percentage of allocated space dedicated for caching purposes, 99% max
     #[arg(long, default_value = "1", value_parser = cache_percentage_parser)]
     cache_percentage: NonZeroU8,
@@ -343,7 +343,7 @@ where
         None => {
             if dev {
                 // `//Alice`
-                PublicKey::from([
+                Ed25519PublicKey::from([
                     0xd4, 0x35, 0x93, 0xc7, 0x15, 0xfd, 0xd3, 0x1c, 0x61, 0x14, 0x1a, 0xbd, 0x04,
                     0xa9, 0x9f, 0xd6, 0x82, 0x2c, 0x85, 0x58, 0x85, 0x4c, 0xcd, 0xe3, 0x9a, 0x56,
                     0x84, 0xe7, 0xa5, 0x6d, 0xa2, 0x7d,
@@ -373,14 +373,14 @@ where
         }
 
         for farm in &disk_farms {
-            if !farm.directory.exists() {
-                if let Err(error) = fs::create_dir(&farm.directory) {
-                    return Err(anyhow!(
-                        "Directory {} doesn't exist and can't be created: {}",
-                        farm.directory.display(),
-                        error
-                    ));
-                }
+            if !farm.directory.exists()
+                && let Err(error) = fs::create_dir(&farm.directory)
+            {
+                return Err(anyhow!(
+                    "Directory {} doesn't exist and can't be created: {}",
+                    farm.directory.display(),
+                    error
+                ));
             }
         }
         None
@@ -416,7 +416,7 @@ where
                 )
             })?
     };
-    let keypair = derive_libp2p_keypair(identity.secret_key());
+    let keypair = derive_libp2p_keypair(&identity);
     let peer_id = keypair.public().to_peer_id();
 
     let mut registry = Registry::with_prefix("subspace_farmer");
@@ -439,7 +439,7 @@ where
         }
 
         configure_network(
-            hex::encode(farmer_app_info.genesis_hash),
+            hex::encode(farmer_app_info.genesis_root),
             first_farm_directory,
             keypair,
             network_args,
@@ -638,7 +638,7 @@ where
                         let info = farm.info();
                         info!("Farm {farm_index}:");
                         info!("  ID: {}", info.id());
-                        info!("  Genesis hash: 0x{}", hex::encode(info.genesis_hash()));
+                        info!("  Genesis hash: 0x{}", hex::encode(info.genesis_root()));
                         info!("  Public key: 0x{}", hex::encode(info.public_key()));
                         info!(
                             "  Allocated space: {} ({})",

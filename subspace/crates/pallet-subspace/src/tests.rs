@@ -7,6 +7,9 @@ use crate::mock::{
 use crate::{
     AllowAuthoringByAnyone, Call, Config, PotSlotIterations, PotSlotIterationsValue, pallet,
 };
+use ab_core_primitives::pot::SlotNumber;
+use ab_core_primitives::segments::SegmentIndex;
+use ab_core_primitives::solutions::SolutionRange;
 use frame_support::{assert_err, assert_ok};
 use frame_system::{EventRecord, Phase};
 use schnorrkel::Keypair;
@@ -18,9 +21,6 @@ use sp_runtime::transaction_validity::{
 };
 use std::assert_matches::assert_matches;
 use std::num::NonZeroU32;
-use subspace_core_primitives::pot::SlotNumber;
-use subspace_core_primitives::segments::SegmentIndex;
-use subspace_core_primitives::solutions::SolutionRange;
 
 #[test]
 fn can_update_solution_range_on_era_change() {
@@ -92,7 +92,7 @@ fn can_override_solution_range_update() {
         };
         assert_eq!(Subspace::solution_ranges(), initial_solution_ranges);
         // enable solution range adjustment
-        let random_solution_range = SolutionRange::from_u64(rand::random());
+        let random_solution_range = SolutionRange::new(rand::random());
         assert_ok!(Subspace::enable_solution_range_adjustment(
             RuntimeOrigin::root(),
             Some(random_solution_range),

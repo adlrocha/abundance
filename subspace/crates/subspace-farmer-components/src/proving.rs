@@ -12,17 +12,17 @@ use crate::sector::{
     SectorContentsMap, SectorContentsMapFromBytesError, SectorMetadataChecksummed,
 };
 use crate::{ReadAt, ReadAtSync};
+use ab_core_primitives::hashes::Blake3Hash;
+use ab_core_primitives::pieces::{PieceOffset, Record, RecordChunk};
+use ab_core_primitives::pos::PosSeed;
+use ab_core_primitives::sectors::{SBucket, SectorId};
+use ab_core_primitives::solutions::{ChunkProof, Solution, SolutionDistance};
 use ab_erasure_coding::ErasureCoding;
 use ab_merkle_tree::balanced_hashed::BalancedHashedMerkleTree;
+use ab_proof_of_space::Table;
 use futures::FutureExt;
 use std::collections::VecDeque;
 use std::io;
-use subspace_core_primitives::hashes::Blake3Hash;
-use subspace_core_primitives::pieces::{PieceOffset, Record, RecordChunk};
-use subspace_core_primitives::pos::PosSeed;
-use subspace_core_primitives::sectors::{SBucket, SectorId};
-use subspace_core_primitives::solutions::{ChunkProof, Solution, SolutionDistance};
-use subspace_proof_of_space::Table;
 use thiserror::Error;
 
 /// Solutions that can be proven if necessary.
@@ -278,14 +278,15 @@ where
 
             Solution {
                 public_key_hash: *self.public_key_hash,
-                sector_index: self.sector_metadata.sector_index,
-                history_size: self.sector_metadata.history_size,
-                piece_offset,
                 record_root: record_metadata.root,
                 record_proof: record_metadata.proof,
                 chunk,
                 chunk_proof: ChunkProof::from(chunk_proof),
                 proof_of_space,
+                history_size: self.sector_metadata.history_size,
+                sector_index: self.sector_metadata.sector_index,
+                piece_offset,
+                padding: [0; _],
             }
         };
 

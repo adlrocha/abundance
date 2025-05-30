@@ -1,3 +1,4 @@
+use ab_core_primitives::pieces::{Piece, PieceIndex};
 use async_lock::Semaphore;
 use backoff::ExponentialBackoff;
 use backoff::future::retry;
@@ -14,7 +15,6 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
-use subspace_core_primitives::pieces::{Piece, PieceIndex};
 use subspace_logging::init_logger;
 use subspace_networking::protocols::request_response::handlers::piece_by_index::PieceByIndexRequestHandler;
 use subspace_networking::utils::piece_provider::{NoPieceValidator, PieceProvider, PieceValidator};
@@ -363,10 +363,10 @@ pub async fn configure_dsn(
         let node_address_sender = Mutex::new(Some(node_address_sender));
 
         move |address| {
-            if matches!(address.iter().next(), Some(Protocol::Ip4(_))) {
-                if let Some(node_address_sender) = node_address_sender.lock().take() {
-                    node_address_sender.send(address.clone()).unwrap();
-                }
+            if matches!(address.iter().next(), Some(Protocol::Ip4(_)))
+                && let Some(node_address_sender) = node_address_sender.lock().take()
+            {
+                node_address_sender.send(address.clone()).unwrap();
             }
         }
     }));

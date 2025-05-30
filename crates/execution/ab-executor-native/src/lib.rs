@@ -1,9 +1,4 @@
-#![feature(
-    generic_arg_infer,
-    non_null_from_ref,
-    ptr_as_ref_unchecked,
-    unsafe_cell_access
-)]
+#![feature(generic_arg_infer, ptr_as_ref_unchecked, unsafe_cell_access)]
 
 mod context;
 
@@ -13,21 +8,24 @@ use ab_contracts_common::env::{Env, EnvState, MethodContext};
 use ab_contracts_common::metadata::decode::{MetadataDecoder, MetadataDecodingError, MetadataItem};
 use ab_contracts_common::method::MethodFingerprint;
 use ab_contracts_common::{
-    Address, Balance, Contract, ContractError, ContractTrait, ContractTraitDefinition,
-    MAX_CODE_SIZE, NativeExecutorContactMethod, ShardIndex,
+    Contract, ContractError, ContractTrait, ContractTraitDefinition, MAX_CODE_SIZE,
+    NativeExecutorContactMethod,
 };
-use ab_contracts_io_type::variable_bytes::VariableBytes;
-use ab_contracts_io_type::variable_elements::VariableElements;
 use ab_contracts_standards::fungible::Fungible;
 use ab_contracts_standards::tx_handler::TxHandlerExt;
+use ab_core_primitives::address::Address;
+use ab_core_primitives::balance::Balance;
+use ab_core_primitives::shard::ShardIndex;
+use ab_core_primitives::transaction::{Transaction, TransactionHeader, TransactionSlot};
 use ab_executor_slots::{Slot, SlotKey, Slots};
+use ab_io_type::variable_bytes::VariableBytes;
+use ab_io_type::variable_elements::VariableElements;
 use ab_system_contract_address_allocator::{AddressAllocator, AddressAllocatorExt};
 use ab_system_contract_block::{Block, BlockExt};
 use ab_system_contract_code::{Code, CodeExt};
 use ab_system_contract_native_token::{NativeToken, NativeTokenExt};
 use ab_system_contract_simple_wallet_base::SimpleWalletBase;
 use ab_system_contract_state::State;
-use ab_transaction::{Transaction, TransactionSlot};
 use halfbrown::HashMap;
 use tracing::error;
 
@@ -282,6 +280,10 @@ impl NativeExecutor {
         transaction: Transaction<'_>,
         slots: &Slots,
     ) -> Result<(), ContractError> {
+        if transaction.header.version != TransactionHeader::TRANSACTION_VERSION {
+            return Err(ContractError::BadInput);
+        }
+
         let env_state = EnvState {
             shard_index: self.shard_index,
             padding_0: Default::default(),
@@ -335,6 +337,10 @@ impl NativeExecutor {
         transaction: Transaction<'_>,
         slots: &mut Slots,
     ) -> Result<(), ContractError> {
+        if transaction.header.version != TransactionHeader::TRANSACTION_VERSION {
+            return Err(ContractError::BadInput);
+        }
+
         // TODO: This is a pretty large data structure to copy around, try to make it a reference
         let env_state = EnvState {
             shard_index: self.shard_index,
@@ -389,6 +395,10 @@ impl NativeExecutor {
         transaction: Transaction<'_>,
         slots: &mut Slots,
     ) -> Result<(), ContractError> {
+        if transaction.header.version != TransactionHeader::TRANSACTION_VERSION {
+            return Err(ContractError::BadInput);
+        }
+
         // TODO: This is a pretty large data structure to copy around, try to make it a reference
         let env_state = EnvState {
             shard_index: self.shard_index,
