@@ -17,17 +17,6 @@
   > I think the whole light client situation should be revisited. With a different storage model and
   > contracts that are closer to pure functions than to apps,
 
-- [ ] Add to the parking lot
-
-  > Consider the use of an independent PoT chain that does not depend on the beacon chain as a
-  > source of entropy and is more efficient to verify and generate than the use of AES. Here's the
-  > cryptography behind drand: https://docs.drand.love/docs/cryptography/
-
-- [ ] Change the README of the spec to explain that I will start adding only the specs for things
-      that are not implemented and that are under design, and that otherwise we are only going to
-      point to the parts of the code that are already implemented. The code is the source of truth
-      and is the way that we can avoid the code and the spec from being out of sync.
-
 > https://abundance.zulipchat.com/#narrow/channel/495788-research/topic/Light.20client/near/517250894
 > Actually I think things might be a bit simpler than I originally expected. First observation is
 > that I think it may not be necessary to have external (to the blockchain) light client for
@@ -496,7 +485,7 @@ Prob (blocks_replaced) = (2*delta/T)^(blocks_replaced)
   farmers in all shards? Leverage the DSN as the data availability layer. (we can reuse the current
   encoding)
 
---- This is key ---
+--- This is key -- pf-
 
 - Can we make greedy requests? Give me the X number of pieces.
 - If we can implement the membership rotation and with high-probability we can have the membership
@@ -634,3 +623,310 @@ Prob (blocks_replaced) = (2*delta/T)^(blocks_replaced)
 > grail for us that may potentially allow us to not have fraud proofs, simply replacing everything
 > with a delay, ensuring there was enough time for the honest farmers to take over whatever
 > temporary dishonest majority may have formed on a particular shard.
+
+# Meeting notes 2025-06-02
+
+1. Membership selection protocol.
+
+- Plots have a unique identity.
+- Plots are the ones assigned to shards and that give power to propose new blocks.
+- Sign with the key used for the plot to prove that you are the owner of the plot and verify the
+  right membership.
+- Requirements: Max number of shards a farmer can sync, level of stickiness (if any), time per
+  verification, collusion time intervals
+
+- Hash-based uniform distribution. Explored the use of a weighted one but we don't have information
+  about whole list and we would need ordering. Can we have plots of a specific size always?
+
+- Q: Can we have a specific size for plots?
+  - The bigger the sector the less you are auditing.
+  - This has some overhead because it requires you to have a lot of space in-memory.
+  - Right now we have 1000 pieces per sector.
+  - It would be nice if we have a hierarchical deterministic identity for the plot from a seed.
+  - What is the minimum that they need to follow? 2 the minimum theoretical, 3 to simplify the
+    implementation.
+  - We would need to do rotation, if we don't sync a lot of shards we may have to increase the
+    reshuffling interval.
+    - Limit the maximum number of storage for allocation
+    - Assume a limit where is the maximum that you can plot. Use this assumption for the design.
+  - Complex solution with clear boundaries.
+  - Trade-off: for an attacker that doesn't want to store a lot of things or store for long, the
+    frequent rotation the best is for security and bad for farmers that are honest. We don't want to
+    let attackers to be able to plot to force their allocation to land into a specific shard (1
+    sector per 3 seconds, there may be a second per sector).
+    - Aggregate identities and batch them to avoid single sector work. Use crypto to show that they
+      were aggregated.
+      - Nazar: "I would like more privacy and more anonimity" if we assign the whole plot with the
+        same identity you can figure out that sectors belong to the same plot and thus for the same
+        farmer".
+      - 1 identity/1 plot
+      - You can create a bigger plot with the same identity.
+      - Think about the crypto
+    - VRF of the allocation to the shard. We need to hide the information about allocation to
+      prevent collusion and DDoS, be explicit about this.
+    - Plots are currently at most 64TiB
+      - Two plots with the same identity but different content. You determine the height of the
+        blockchain history. Slightly older and newer sector and you can audit both. Both are valid.
+        We want plots to also expire.
+    - 1GiB plot is the minimum (one sector). We need fixed sizes and we need sector IDs.
+    - Use average sizes of plots and use plot identities. Number of shards a function of the demand.
+
+2. Segment verification
+
+- Use the current sync mechanism to verify segments and report any misbehaviour.
+- We don't need to check segments that have been archived in the global history because they are
+  potentially part of plots and they are verified through re-plotting.
+  - How are we currently checking the availability of segments in Subspace?
+
+3. Next plotting / farming
+
+   ---- Notes ---
+
+- P(k attacker plots in Sj​)=(knj​​)(fattacker​)k(1-fattacker​)nj​-k- **Model (Binomial
+  Distribution/Chernoff Bounds):** The number of attacker-controlled plots in a given shard can be
+  modeled by a binomial distribution. Let k be the number of attacker plots in a shard. The
+  probability of having k attacker plots in a shard Sj​ is:
+
+  P(k attacker plots in Sj​)=(knj​​)(fattacker​)k(1-fattacker​)nj​-k
+
+  More practically, we are interested in the probability that an attacker controls _more than a
+  certain threshold_ (τ) of plots within a shard.
+
+  **Chernoff Bounds** can be used to estimate the tail probabilities: Let Xj​ be the number of
+  attacker-controlled plots in shard Sj​. The expected number of attacker plots in shard Sj​ is
+  E[Xj​]=nj​⋅fattacker​.
+
+  For δ>0: P(Xj​>(1+δ)E[Xj​])≤exp(-3E[Xj​]δ2​)
+
+  This allows you to calculate the probability of an attacker gaining a disproportionate share of a
+  shard.
+
+  - **Correctness Criteria:** The probability of an attacker controlling more than τ of plots in
+    _any_ shard should be below a very small, acceptable threshold. This informs decisions about NS​
+    and the overall security assumptions.
+
+### Probability of Attack (Collusion)
+
+The goal of shuffling is to make it statistically improbable for an attacker to control a
+supermajority (e.g., 2/3, 1/2 + 1, or 1/3 for liveness attacks) of plots within a single shard, even
+if they control a significant fraction of the total plots in the network.
+
+- **Assumptions:**
+
+  - Total number of plots: NP​
+  - Number of shards: NS​
+  - Average plots per shard: k=NP​/NS​
+  - Fraction of plots controlled by attacker: α∈[0,1] (i.e., αNP​ plots are malicious).
+  - A successful attack on a shard requires τ fraction of plots in that shard to be malicious (e.g.,
+    τ=2/3 for safety, τ=1/3 for liveness).
+
+- **Model (Binomial Distribution):** For a _single specific shard_, the number of malicious plots X
+  can be modeled as a binomial distribution if plot assignments are truly random and independent.
+  X∼B(nj​,α), where nj​ is the number of plots in shard j. Assuming uniform distribution, nj​≈k.
+
+  The probability that a specific shard has at least τnj​ malicious plots is:
+  P(X≥τnj​)=∑i=⌈τnj​⌉nj​​(inj​​)αi(1-α)nj​-i
+
+- **Model (Chernoff Bounds - for tail probabilities):** This is often more useful for bounding the
+  probability of _any_ shard being compromised. Let Xmalicious,j​ be the number of malicious plots
+  in shard j. The expected number of malicious plots in shard j is E[Xmalicious,j​]=nj​⋅α.
+
+  If you want to find the probability that Xmalicious,j​ exceeds a certain threshold (1+δ) of its
+  expectation, i.e., P(Xmalicious,j​>(1+δ)E[Xmalicious,j​]):
+  P(Xmalicious,j​>(1+δ)E[Xmalicious,j​])≤exp(-3E[Xmalicious,j​]δ2​)
+
+# Meeting notes 2025-06-04
+
+1. When is PoS proved, and can we use this to prove the size of a plot?
+
+### Proposed model of membership allocation.
+
+We will divide the membership allocation protocol in two stages:
+
+- Plot allocation
+- Difficulty adjustment (load balancing) We are going to consider the first one mandatory, and the
+  second one is an idea that I came up with to improve the quality of the system, but it shouldn't
+  be needed for the system's correctness. Having two stages may allow us to minmise the number of
+  times that a farmer needs to be re-assigned.
+
+- Assumptions:
+
+  - The minimum number of membership is the plot. Plots are uniquely identified, and they will
+    determine the shards with which the farmers need to sync.
+  - Plots will have a `MAX_PLOT_SIZE` that determines the maximum size of the plot in bytes.
+  - Only leaf shards are considered for the membership allocation. When a farmer is assigned to a
+    leaf shard, it will need to sync with the leaf shard, its parent shards, and of course the
+    beacon chain.
+
+- Protocol parameters:
+
+  - `NUM_SHARDS`: The number of leaf shards in the system.
+  - `MAX_PLOT_SIZE`: The maximum size of a plot in bytes.
+  - `total_storage`: The total storage capacity of the system in bytes.
+  - `plot_j`: Identity of a plot with ID `j
+  - `MEMBERSHIP_RESHUFFLE_INTERVAL`: The interval between membership reshuffles in slots.
+  - `NEW_MEMBERSHIP_WARMUP_INTERVAL`: The interval between the membership reshuffle and the new
+    membership coming to effect in slots.
+  - `BALANCING_INTERVAL`: The interval between difficulty adjustments in slots. This is not a full
+    membership reshuffle, but a partial re-balancing for misrepresented shards.
+  - `BALANCING_THRESHOLD`: The threshold for the difficulty adjustment. If the difficulty of a shard
+    is below this threshold, it will be considered misrepresented and the difficulty will be
+    adjusted.
+  - `BALANCING_WARMUP_INTERVAL`: The interval between the difficulty adjustment and the new
+    difficulty coming to effect in slots.
+
+- Membership allocation protocol:
+
+  - Every `MEMBERSHIP_RESHUFFLE_INTERVAL` slots, the membership allocation protocol is executed.
+  - The target storage per shard is first computed as
+    `target_storage_per_shard = total_storage / NUM_SHARDS`.
+
+    > Q: Can we have the number of plots in the system? If this is the case, it would be better to
+    > compute total_storage as the sum of all plots considering they have `MAX_PLOT_SIZE`.
+    >
+    > - We don't have the total number of plots so we need to go with total storage and the number
+    >   of plots may not be balanced, but it shouldn't impact the analysis.
+
+  - The number of plots to be assigned per shard is computed as
+    `plots_per_shard = floor(target_storage_per_shard / MAX_PLOT_SIZE)`.
+  - With this in mind, the specific shard for each plot is computed randomly leveraging a VRF of the
+    plot identity, feeding the randomness for this epoch in something like:
+
+  > NOTE: plots_per_shard gives us nothing because we can't balance the number of plots per shard as
+  > we don't know the total number of plots in the system.
+
+  ```
+  shard_id = VRF(plot_identity, epoch_randomness) % NUM_SHARDS
+  ```
+
+  > Note: The specifics of this computation won't modify the protocol as long as it is random and
+  > uniform.
+
+  - We can compute the probability of a farmer being able to attack a shard as:
+
+$$
+P(X_k \ge k_\alpha) = \sum_{j=k_\alpha}^{K_M} \binom{K_M}{j} \left(\frac{1}{N}\right)^j \left(1 - \frac{1}{N}\right)^{K_M - j}
+$$
+
+> Note:
+>
+> - Plotting allocation (the attack for this)
+> - Bribe farmers (collusion attack, sustained attack) --> Look for papers that objective compute
+>   the probability of bribing or something like that.
+> - Attacks in the warmup interval (TODO: I am missing this one)
+
+where:
+
+- ka = is the number of shards that the attacker needs to get control of a shard. For a
+  longest-chain protocol like ours 51%. This can be computed as
+  `ka = (percentage_storage * target_storage_shard) / MAX_PLOT_SIZE`
+- KM = total number of plots owned by the farmer = `farmer_storage / MAX_PLOT_SIZE`
+- N = number of shards
+- SM = total storage controlled by the farmer.
+
+- Optimal reshuffling interval.
+
+  - The epoch duration should be a function of the probability of a sustain attack and the cost of
+    re-shuffling for farmers, where w1 and w2 are our own subjective weights on the importance of
+    each:
+
+```
+optimal_epoch = w1 * probability_of_sustain_attack + w2 * cost_of_reshuffling
+```
+
+> NOTE: cost_of_reshuffling needs to have a minimum value which is the overall cost to change
+> shards, and the maximum being the time to plot enough plots to get control of a shard.
+
+- The probability of a sustain attack is a decreasing function of the reshuffling interval.
+- The cost of re-shuffling is an increasing function of 1/reshuffling interval.
+- So shorter epochs --> higher cost --> lower probability of attack.
+- Thus, reshuffling interval should be ideally << time for an attack.
+- We can use as a baseline the empirical value that the plotting throughput that we can currently
+  have is ~3.6T/hour.
+  > Q: The size of the network would determine the size of the shards and we need to decide this.
+- We can leverage `MAX_PLOT_SIZE` to determine the optimal reshuffling interval.
+
+> Q: What should we include in the cost of re-shuffling?
+>
+> - Syncing with the new shard. (anything else?)
+> - Discovery of peers.
+> - Fetch the blocks
+> - Sharing transactions
+
+> Q: What is the target time of attack?
+>
+> - This should be determined by the time that an attacker needs to create plots that with high
+>   probability allows to get control of a shard (see probability computation from above)
+> - Also add any collusion metrics that we think are relevant.
+
+- Load balancing interval
+  - We can compute the total difficulty of the system through the solution range.
+  - From the solution range we can get the sectors that range that solution range.
+  - We can get the solution range for each leaf shard (and even intermediate shard).
+  - We get the over-represented and under-represented shards and run the membership allocation
+    protocol over the farmers in those shards. This should trigger a load-balancing among all the
+    farmers from these.
+
+> Next steps:
+>
+> - Complete the analysis with the missing attack.
+> - VRF do not worry about it but we need to analyse the warmup interval potential attacks, and the
+>   DDoS surface attack once the VRF determines the allocation (and how we can know that is the
+>   active membership).
+> - Write down a discussion with the full model so that it can be understood by human beings and we
+>   can have it as a base.
+> - The size of the network according to the total storage and the number of shards needs to be
+>   determined.
+> - Let's consider the minimum interval of re-shuffling one-hour and let's understand if there are
+>   blockers that could kill that.
+> - Think about the economic cost of the attack. Attackers use computation and honest nodes are
+>   using storage as the fixed cost resource.
+> - Theoretically we can increase the cost of plotting if needed and they can create a chia table
+>   when they generate the challenge.
+
+> Nazar: The attacker, if they control the majority of a shard they can drop blocks and make it look
+> as balanced and "beautiful", so we should never allow for this (this would also break the
+> balancing idea).
+>
+> - Selfish mining.
+
+> Note:
+>
+> - See explorers for some numbers on the order of magnitude that the Autonomys network currently
+>   has: https://astral.autonomys.xyz/mainnet/consensus
+> - H9 allows renting storage and makes a comparison between different PoS networks.
+
+# Meeting 2025-06-09
+
+1. Discuss no attacks in the reshuffling interval, fully adaptive adversary from free2shard.
+
+- What if we have a list of plots and I can grind the identities to assign the plots.
+- Nicehash should be considered for the attack (is this static or adaptive adversary?)
+- PoS is burning coins while if we consider renting hardware we are not in the same game.
+- The only reason why bitcoin is secure compared to our model is just scale, otherwise it would have
+  the same vulnerabilities.
+- We need to be mindful about the number of cores directed to execute transaction in shards which
+  means that it may limit the number of shards we can have (and sync with from a node perspective).
+- We may want in testnet to have just 2 leaf shards so that everyone is following almost everything
+  and we can have full security while making sure that the protocol is correct. We may want to
+  introduce an additional shard where a subset of farmers is not following it so we can evaluate the
+  correctness and the implementation in something closer to the real scenario.
+
+2. Share the Python script and evaluate parameters.
+
+- Next steps:
+  - Review comments from segment commitments and super segments that is blocking Nazar.
+  - Python script improvements for membership allocation.
+  - Read the PR: https://github.com/nazar-pc/abundance/pull/278
+
+# --- TODOs for the modelling script ---
+
+# TODO: Add a parameter that considers the size of the history?
+
+# TODO: Measured storage? How much malicious storage we can have in any shard to corrupt it? (51% or less?)
+
+# TODO: Figure out how much it costs to pull off that attack.
+
+# TODO: The cost such be a substantial fraction of the whole network. We want to make sure that we have morel that the half total space to attack the shard. The cost should be higher than if I dedicate the plots honestly.
+
+# TODO: All the computation the world should be used for something, and this protocol should enable it.
