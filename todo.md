@@ -930,3 +930,180 @@ optimal_epoch = w1 * probability_of_sustain_attack + w2 * cost_of_reshuffling
 # TODO: The cost such be a substantial fraction of the whole network. We want to make sure that we have morel that the half total space to attack the shard. The cost should be higher than if I dedicate the plots honestly.
 
 # TODO: All the computation the world should be used for something, and this protocol should enable it.
+
+# Meeting 2025-06-11
+
+1. Type of attacks
+
+- Share the changes in the model with throughput and storage limited attacks.
+
+1. Discuss how the history size impacts the probability of attack.
+
+- The protocol is storing the whole history. We need to force farmers to re-plot periodically to
+  update them for the new global history.
+- The history size can be selected in a way that the plot will expire earlier but I choose valid
+  sectors that belong to the previous history.
+- I can create x5 times the expected size because I commit all sectors to different history sizes.
+- 1PiB of SSDs. Create multiple 65TiB of the same plot to the same petabyte. You would move the
+  whole petabyte.
+- Half of the plots will expire every epoch.
+- We want farmers to re-plot but we don't want them to do it that often because otherwise we are
+  PoW.
+- Pieces won't be plotted until the window is stopped. Mechanism for plotting so that we don't plot
+  often.
+
+- Storage should be kept below the threshold of honest storage (so it is virtually unlimited but we
+  want to limit it).
+  - how does having bigger plots impact the probability of attack?
+- TODO: 51% attack globally means the beacon chain is secure but what about the shards? What is the
+  number in this case?
+- TODO: Even if the plot is unbounded but the size is below than the honest majority and they have
+  issues moving it around then it means we can be secure.
+  - We can probably upper bounded with the size of the history size. This is the multiplier of the
+    number of additional sectors that the attacker can do.
+  - This will be an input in the decision on the number of shards that we can have. We can probably
+    compute this.
+
+1. Comparison with honest cost.
+
+- We want to make rational honest plotting over attacking it even if attacking is a bearable cost.
+- The yield should be more than what you put in.
+- The cost of attacking should be a function of on-going normal cost of operation.
+  - It is generally expected that this will not be profitable if you are trying to do it on-purpose
+    buying hardware and operation. Maybe in economic of scale that may be possible. We should
+    accommodate for the computers and general-purpose that wouldn't add big farms and we have edge
+    honest computers.
+
+---
+
+To discuss next around segment submission:
+
+- https://github.com/nazar-pc/abundance/pull/267/files#r2120139511
+- https://github.com/nazar-pc/abundance/pull/267/files#r2120067069
+
+# Meeting 2025-06-16
+
+- Latex support for the blog (tried but I keep breaking the template)
+- Share model to compute security bound for the protocol (30%-45% of the honest storage should be
+  enough to secure the protocol).
+- Discuss plot uniqueness
+
+  - What does this mean practically to the farmer.
+  - When will things expire and how they will expire.
+  - Are we expiring things in large quantity?
+
+- Notes on the reshuffling interval:
+
+  - We can use the reshuffling interval to determine the number of reshuffling that we need to wait
+    so several segments and a high population has checked segments.
+
+- TODO: Modeling the interval shuffling in a way were we can be sure if we can have just this
+  approach of membership allocation and no optimistic paths that require fraud proofs. This should
+  be secure with high-probability.
+- Probability of expiration check:
+  https://github.com/nazar-pc/abundance/blob/72349dc2f0505be4da766e01dc5f1240acd4f22c/crates/shared/ab-core-primitives/src/sectors.rs#L237-L268
+- TODO: What is the boundary in terms of finality so that we can live without fraud proofs? And if
+  we can how much we need to wait?
+- TODO: How to organise plots. Come up with the farming side to unblock Nazar.
+
+  > TODO: Next step: Think about expiration of plots and how to handle it withe the plot uniqueness
+  > model that we have.
+
+  > TODO: How much do we increase the replotting compared to the current state in Subspace?
+  >
+  > - Half of the plot needs to expire every time that the history doubles.
+  > - See
+  >   https://github.com/nazar-pc/abundance/blob/72349dc2f0505be4da766e01dc5f1240acd4f22c/crates/shared/ab-core-primitives/src/sectors.rs#L237-L268
+  >   for the probability expiration.
+
+# Meeting 2025-06-20
+
+1. Discuss fraud proofs and reshuffling interval model.
+2. Discuss farming process.
+3. Discuss sector expiration.
+
+- Fixed window plot size
+- Farmer elected window size.
+
+- Before a block is confirmed in the beacon chain we need to ensure that it is final, so we need to
+  wait to ensure that the reshuffling interval has caught any bugs.
+- Check sync notes in Autonomys forum by Nazar:
+  https://forum.autonomys.xyz/t/a-lot-faster-snap-sync/4847?u=nazar-pc
+  - PoT is something that we need to validate. You need to verify it and in the last few blocks you
+    verify the last few blocks and that can be expensive.
+- The formal models we have limitations in both sides.
+
+  - TODO: Update the script so that I include all of the models and we can check that they are
+    overlapping when changing the security parameters.
+
+- How does the window range for plots affect the inclusion of recent pieces.
+- Plot ID. Sliding window for the history range.
+- The only time if we have a big problem if all farmers have the same interval.
+- IF you generate a plot you generate a public key and you determine the history size as the tuple.
+- If you create the plot at different points of time, and the interval will start at different
+  points of time.
+
+- A key pair, public key hash, and an interval from which you are plotting to (e.g. sectors)
+- Until you don't have 10 segments you can't start plotting.
+- You can have an offset in addition to the key pair.
+- For one farmer may be 0-9 and for the other 2-11.
+- Different farmers will have different intervals. Some farmers may have to wait until plot 19. But
+  other may be able to do 8-19. At random some will be able to get the recent pieces.
+- Jumping window in interval sizes depending on some number determined in the plot id.
+- The last complete range of segments will be 1-100 (this are sector indices). We commit to a range
+  of history sizes instead of a specific history size. That range or few ranges are considered
+  recent and the other is the old history.
+- Look at selection algorithm for the sectors:
+  https://github.com/nazar-pc/abundance/blob/d9174318f9bd0c6d794b85b6b160e4329c9f29f7/crates/shared/ab-core-primitives/src/sectors.rs#L173-L216
+
+  > - TODO: We need to do some simulations to understand if the history is stored. Can we formalise
+  >   this?
+
+# Meeting 2025-06-23
+
+1. Sector expiration and history size with plot ID uniqueness
+
+- Farmers choose a random offset from zero to the range of history segments that we commit to.
+- This offset will determine the size of the window that the farmer is plotting its sector to but no
+  the specific window.
+- Commit range influences piece selection instead of influencing the range of history sizes that a
+  sector can be committed to.
+- We can say that it expires like in subspace even if we use a range, and the ranges will be
+  exponential in size, it follows the same trajectory as replotting. As you commit the offset it
+  determines where the multiplication starts and we need to choose the parameters so the window
+  sizes is determined.
+- There is a pre-determined set of history sizes that you can commit to. The range that you commit
+  with will determine where you can commit your sectors.
+- You would choose the latest history size that you see for your range.
+  - History size of 8
+  - Orange farmer and the current history size is 3 segments and we want to create a new sector.
+    What do you choose as pieces for this sector.
+    - I can see the range that is available for me.
+    - I can only choose from the range of thing that are in the past
+    - That is where you choose from 0 to 1 because of your offset and your range, even if there is
+      something more recent available I won't be able to choose from it.
+    - It expired and now history size is 8.
+    - I am committing to the history size of 8 and I limit the range.
+    - Expiration rules so that we limit the range.
+    - Exponential range so that it fits more segments so that the less often sectors expire. Is this
+      true?
+    - We can say that everything committed in 2x expired in 4x. There are two ranges at every time
+      that are valid.
+    - If we are at range N and it expired, N+1 is valid and N+2 is valid.
+    - It will expire in the middle of the next range so that I am force to replot in the next
+      interval.
+    - Every next time there is less expiration but then we still have the same history size to
+      commit to.
+
+> TODO: We can immediately expire. The ranges are larger and we may be able to simplify the
+> expiration logic. Explore the expiration so we don't have to guess when it will expire because you
+> already know through your range.. Ideally every farmer commits to a different history size. Every
+> single segment has a farmer committed to it.
+
+> TODO: Think about how to make this explainable.
+
+- Maybe every of these ranges are part of this plot ID and you end up in two shards at the same
+  time?
+
+> TODO: The most immediate priority is to have the script updated with the two models and start
+> playing with the protocol parameters. It can also help implementing the expiration there.
