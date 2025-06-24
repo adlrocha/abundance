@@ -1,5 +1,7 @@
 //! Proof of time implementation.
 
+#![cfg_attr(target_arch = "aarch64", feature(array_chunks))]
+#![feature(portable_simd)]
 #![no_std]
 
 mod aes;
@@ -26,6 +28,7 @@ pub enum PotError {
 /// Run PoT proving and produce checkpoints.
 ///
 /// Returns error if `iterations` is not a multiple of checkpoints times two.
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
 pub fn prove(seed: PotSeed, iterations: NonZeroU32) -> Result<PotCheckpoints, PotError> {
     if iterations.get() % u32::from(PotCheckpoints::NUM_CHECKPOINTS.get() * 2) != 0 {
         return Err(PotError::NotMultipleOfCheckpoints {
@@ -34,6 +37,7 @@ pub fn prove(seed: PotSeed, iterations: NonZeroU32) -> Result<PotCheckpoints, Po
         });
     }
 
+    // TODO: Is there a point in having both values derived from the same source?
     Ok(aes::create(
         seed,
         seed.key(),
@@ -44,6 +48,11 @@ pub fn prove(seed: PotSeed, iterations: NonZeroU32) -> Result<PotCheckpoints, Po
 /// Verify checkpoint, number of iterations is set across uniformly distributed checkpoints.
 ///
 /// Returns error if `iterations` is not a multiple of checkpoints times two.
+// TODO: Figure out what is wrong with macOS here
+#[cfg_attr(
+    all(feature = "no-panic", not(target_os = "macos")),
+    no_panic::no_panic
+)]
 pub fn verify(
     seed: PotSeed,
     iterations: NonZeroU32,

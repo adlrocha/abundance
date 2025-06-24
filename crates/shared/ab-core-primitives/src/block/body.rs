@@ -6,22 +6,41 @@ pub mod owned;
 use crate::block::align_to_and_ensure_zero_padding;
 #[cfg(feature = "alloc")]
 use crate::block::body::owned::{
-    OwnedBeaconChainBlockBody, OwnedBeaconChainBlockBodyError, OwnedBlockBody, OwnedBlockBodyError,
-    OwnedIntermediateShardBlockBody, OwnedIntermediateShardBlockBodyError, OwnedLeafShardBlockBody,
-    OwnedLeafShardBlockBodyError,
+    GenericOwnedBlockBody, OwnedBeaconChainBody, OwnedBlockBody, OwnedIntermediateShardBody,
+    OwnedLeafShardBody,
 };
-use crate::block::header::{IntermediateShardBlockHeader, LeafShardBlockHeader};
+use crate::block::header::{IntermediateShardHeader, LeafShardHeader};
 use crate::hashes::Blake3Hash;
 use crate::pot::PotCheckpoints;
 use crate::segments::SegmentRoot;
 use crate::shard::ShardKind;
 use crate::transaction::Transaction;
 use ab_io_type::trivial_type::TrivialType;
-use ab_merkle_tree::balanced_hashed::BalancedHashedMerkleTree;
-use ab_merkle_tree::unbalanced_hashed::UnbalancedHashedMerkleTree;
+use ab_merkle_tree::balanced::BalancedMerkleTree;
+use ab_merkle_tree::unbalanced::UnbalancedMerkleTree;
 use core::iter::TrustedLen;
-use core::slice;
+use core::{fmt, slice};
 use derive_more::From;
+use yoke::Yokeable;
+
+/// Generic block body
+pub trait GenericBlockBody<'a>
+where
+    Self: Copy + fmt::Debug,
+{
+    /// Owned block body
+    #[cfg(feature = "alloc")]
+    type Owned: GenericOwnedBlockBody<Body<'a> = Self>
+    where
+        Self: 'a;
+
+    /// Turn into owned version
+    #[cfg(feature = "alloc")]
+    fn to_owned(self) -> Self::Owned;
+
+    /// Compute block body root
+    fn root(&self) -> Blake3Hash;
+}
 
 /// Calculates a Merkle Tree root for a provided list of segment roots
 #[inline]
@@ -30,14 +49,14 @@ where
     Item: AsRef<[u8]>,
     Iter: IntoIterator<Item = Item>,
 {
-    // TODO: This is a workaround for https://github.com/rust-lang/rust/issues/139866 that
-    //  allows the code to compile. Constant 16 is hardcoded here and in `if` branch below
-    //  for compilation to succeed
+    // TODO: This is a workaround for https://github.com/rust-lang/rust/issues/139866 that allows
+    //  the code to compile. Constant 4294967295 is hardcoded here and below for compilation to
+    //  succeed.
     const _: () = {
         assert!(u32::MAX == 4294967295);
     };
     // TODO: Keyed hash
-    let root = UnbalancedHashedMerkleTree::compute_root_only::<4294967295, _, _>(
+    let root = UnbalancedMerkleTree::compute_root_only::<4294967295, _, _>(
         segment_roots.into_iter().map(|segment_root| {
             // Hash the root again so we can prove it, otherwise segments root is indistinguishable
             // from individual segment roots and can be used to confuse verifier
@@ -49,10 +68,10 @@ where
 }
 
 /// Information about intermediate shard block
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct IntermediateShardBlockInfo<'a> {
     /// Block header that corresponds to an intermediate shard
-    pub header: IntermediateShardBlockHeader<'a>,
+    pub header: IntermediateShardHeader<'a>,
     /// Segment roots proof if there are segment roots in the corresponding block
     pub segment_roots_proof: Option<&'a [u8; 32]>,
     /// Segment roots produced by this shard
@@ -68,12 +87,12 @@ impl IntermediateShardBlockInfo<'_> {
         // TODO: Keyed hash
         const MAX_N: usize = 3;
         let leaves: [_; MAX_N] = [
-            **self.header.root(),
+            ***self.header.root(),
             *compute_segments_root(self.own_segment_roots),
             *compute_segments_root(self.child_segment_roots),
         ];
 
-        let root = UnbalancedHashedMerkleTree::compute_root_only::<MAX_N, _, _>(leaves)
+        let root = UnbalancedMerkleTree::compute_root_only::<{ MAX_N as u64 }, _, _>(leaves)
             .expect("The list is not empty; qed");
 
         Blake3Hash::new(root)
@@ -122,7 +141,7 @@ impl<'a> IntermediateShardBlocksInfo<'a> {
             let num_child_segment_roots = usize::from(u16::from_le_bytes([counts[1], counts[2]]));
             counts = &counts[3..];
 
-            (_, remainder) = IntermediateShardBlockHeader::try_from_bytes(remainder)?;
+            (_, remainder) = IntermediateShardHeader::try_from_bytes(remainder)?;
 
             remainder = align_to_and_ensure_zero_padding::<u64>(remainder)?;
 
@@ -163,7 +182,7 @@ impl<'a> IntermediateShardBlocksInfo<'a> {
 
             // TODO: Unchecked method would have been helpful here
             let header;
-            (header, remainder) = IntermediateShardBlockHeader::try_from_bytes(remainder)
+            (header, remainder) = IntermediateShardHeader::try_from_bytes(remainder)
                 .expect("Already checked in constructor; qed");
 
             remainder = align_to_and_ensure_zero_padding::<u64>(remainder)
@@ -257,18 +276,17 @@ impl<'a> IntermediateShardBlocksInfo<'a> {
     /// Returns default value for an empty collection of shard blocks.
     #[inline]
     pub fn headers_root(&self) -> Blake3Hash {
-        let root =
-            UnbalancedHashedMerkleTree::compute_root_only::<{ u16::MAX as usize + 1 }, _, _>(
-                // TODO: Keyed hash
-                self.iter().map(|shard_block_info| {
-                    // Hash the root again so we can prove it, otherwise headers root is
-                    // indistinguishable from individual block roots and can be used to confuse
-                    // verifier
+        let root = UnbalancedMerkleTree::compute_root_only::<{ u16::MAX as u64 + 1 }, _, _>(
+            // TODO: Keyed hash
+            self.iter().map(|shard_block_info| {
+                // Hash the root again so we can prove it, otherwise headers root is
+                // indistinguishable from individual block roots and can be used to confuse
+                // verifier
 
-                    blake3::hash(shard_block_info.header.root().as_ref())
-                }),
-            )
-            .unwrap_or_default();
+                blake3::hash(shard_block_info.header.root().as_ref())
+            }),
+        )
+        .unwrap_or_default();
 
         Blake3Hash::new(root)
     }
@@ -278,29 +296,46 @@ impl<'a> IntermediateShardBlocksInfo<'a> {
     /// Returns default value for an empty collection of shard blocks.
     #[inline]
     pub fn root(&self) -> Blake3Hash {
-        let root =
-            UnbalancedHashedMerkleTree::compute_root_only::<{ u16::MAX as usize + 1 }, _, _>(
-                self.iter().map(|shard_block_info| shard_block_info.root()),
-            )
-            .unwrap_or_default();
+        let root = UnbalancedMerkleTree::compute_root_only::<{ u16::MAX as u64 + 1 }, _, _>(
+            self.iter().map(|shard_block_info| shard_block_info.root()),
+        )
+        .unwrap_or_default();
 
         Blake3Hash::new(root)
     }
 }
 
 /// Block body that corresponds to the beacon chain
-#[derive(Debug, Copy, Clone)]
-pub struct BeaconChainBlockBody<'a> {
+#[derive(Debug, Copy, Clone, Yokeable)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
+pub struct BeaconChainBody<'a> {
     /// Segment roots produced by this shard
-    pub own_segment_roots: &'a [SegmentRoot],
+    own_segment_roots: &'a [SegmentRoot],
     /// Intermediate shard blocks
-    pub intermediate_shard_blocks: IntermediateShardBlocksInfo<'a>,
+    intermediate_shard_blocks: IntermediateShardBlocksInfo<'a>,
     /// Proof of time checkpoints from after future proof of time of the parent block to current
     /// block's future proof of time (inclusive)
-    pub pot_checkpoints: &'a [PotCheckpoints],
+    pot_checkpoints: &'a [PotCheckpoints],
 }
 
-impl<'a> BeaconChainBlockBody<'a> {
+impl<'a> GenericBlockBody<'a> for BeaconChainBody<'a> {
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedBeaconChainBody;
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
+    }
+
+    #[inline(always)]
+    fn root(&self) -> Blake3Hash {
+        self.root()
+    }
+}
+
+impl<'a> BeaconChainBody<'a> {
     /// Create an instance from provided correctly aligned bytes.
     ///
     /// `bytes` should be 4-bytes aligned.
@@ -365,7 +400,10 @@ impl<'a> BeaconChainBlockBody<'a> {
         Some((body, remainder))
     }
 
-    /// Check block body's internal consistency
+    /// Check block body's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         self.intermediate_shard_blocks
@@ -376,11 +414,11 @@ impl<'a> BeaconChainBlockBody<'a> {
                     return true;
                 };
 
-                BalancedHashedMerkleTree::<2>::verify(
+                BalancedMerkleTree::<2>::verify(
                     &intermediate_shard_block.header.result.body_root,
                     &[segment_roots_proof],
                     0,
-                    BalancedHashedMerkleTree::compute_root_only(&[
+                    BalancedMerkleTree::compute_root_only(&[
                         *compute_segments_root(intermediate_shard_block.own_segment_roots),
                         *compute_segments_root(intermediate_shard_block.child_segment_roots),
                     ]),
@@ -447,16 +485,40 @@ impl<'a> BeaconChainBlockBody<'a> {
     }
 
     /// Create an owned version of this body
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(self) -> Result<OwnedBeaconChainBlockBody, OwnedBeaconChainBlockBodyError> {
-        OwnedBeaconChainBlockBody::from_body(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedBeaconChainBody {
+        OwnedBeaconChainBody::new(
+            self.own_segment_roots.iter().copied(),
+            self.intermediate_shard_blocks.iter(),
+            self.pot_checkpoints,
+        )
+        .expect("`self` is always a valid invariant; qed")
+    }
+
+    /// Segment roots produced by this shard
+    #[inline(always)]
+    pub fn own_segment_roots(&self) -> &'a [SegmentRoot] {
+        self.own_segment_roots
+    }
+
+    /// Intermediate shard blocks
+    #[inline(always)]
+    pub fn intermediate_shard_blocks(&self) -> &IntermediateShardBlocksInfo<'a> {
+        &self.intermediate_shard_blocks
+    }
+
+    /// Proof of time checkpoints from after future proof of time of the parent block to current
+    /// block's future proof of time (inclusive)
+    #[inline(always)]
+    pub fn pot_checkpoints(&self) -> &'a [PotCheckpoints] {
+        self.pot_checkpoints
     }
 
     /// Compute block body root
     #[inline]
     pub fn root(&self) -> Blake3Hash {
-        let root = BalancedHashedMerkleTree::compute_root_only(&[
+        let root = BalancedMerkleTree::compute_root_only(&[
             *compute_segments_root(self.own_segment_roots),
             *self.intermediate_shard_blocks.segments_root(),
             *self.intermediate_shard_blocks.headers_root(),
@@ -469,10 +531,10 @@ impl<'a> BeaconChainBlockBody<'a> {
 }
 
 /// Information about leaf shard block
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct LeafShardBlockInfo<'a> {
     /// Block header that corresponds to an intermediate shard
-    pub header: LeafShardBlockHeader<'a>,
+    pub header: LeafShardHeader<'a>,
     /// Segment roots proof if there are segment roots in the corresponding block
     pub segment_roots_proof: Option<&'a [u8; 32]>,
     /// Segment roots produced by this shard
@@ -518,7 +580,7 @@ impl<'a> LeafShardBlocksInfo<'a> {
             let num_own_segment_roots = usize::from(counts[0]);
             counts = &counts[1..];
 
-            (_, remainder) = LeafShardBlockHeader::try_from_bytes(remainder)?;
+            (_, remainder) = LeafShardHeader::try_from_bytes(remainder)?;
 
             remainder = align_to_and_ensure_zero_padding::<u64>(remainder)?;
 
@@ -556,7 +618,7 @@ impl<'a> LeafShardBlocksInfo<'a> {
 
             // TODO: Unchecked method would have been helpful here
             let header;
-            (header, remainder) = LeafShardBlockHeader::try_from_bytes(remainder)
+            (header, remainder) = LeafShardHeader::try_from_bytes(remainder)
                 .expect("Already checked in constructor; qed");
 
             remainder = align_to_and_ensure_zero_padding::<u64>(remainder)
@@ -627,17 +689,179 @@ impl<'a> LeafShardBlocksInfo<'a> {
     /// Returns default value for an empty collection of shard blocks.
     #[inline]
     pub fn headers_root(&self) -> Blake3Hash {
-        let root =
-            UnbalancedHashedMerkleTree::compute_root_only::<{ u16::MAX as usize + 1 }, _, _>(
-                self.iter().map(|shard_block_info| {
-                    // Hash the root again so we can prove it, otherwise headers root is
-                    // indistinguishable from individual block roots and can be used to confuse
-                    // verifier
+        let root = UnbalancedMerkleTree::compute_root_only::<{ u16::MAX as u64 + 1 }, _, _>(
+            self.iter().map(|shard_block_info| {
+                // Hash the root again so we can prove it, otherwise headers root is
+                // indistinguishable from individual block roots and can be used to confuse
+                // verifier
 
-                    blake3::hash(shard_block_info.header.root().as_ref())
-                }),
+                blake3::hash(shard_block_info.header.root().as_ref())
+            }),
+        )
+        .unwrap_or_default();
+
+        Blake3Hash::new(root)
+    }
+}
+
+/// Block body that corresponds to an intermediate shard
+#[derive(Debug, Copy, Clone, Yokeable)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
+pub struct IntermediateShardBody<'a> {
+    /// Segment roots produced by this shard
+    own_segment_roots: &'a [SegmentRoot],
+    /// Leaf shard blocks
+    leaf_shard_blocks: LeafShardBlocksInfo<'a>,
+}
+
+impl<'a> GenericBlockBody<'a> for IntermediateShardBody<'a> {
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedIntermediateShardBody;
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
+    }
+
+    #[inline(always)]
+    fn root(&self) -> Blake3Hash {
+        self.root()
+    }
+}
+
+impl<'a> IntermediateShardBody<'a> {
+    /// Create an instance from provided bytes.
+    ///
+    /// `bytes` do not need to be aligned.
+    ///
+    /// Returns an instance and remaining bytes on success.
+    #[inline]
+    pub fn try_from_bytes(mut bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
+        // The layout here is as follows:
+        // * number of own segment roots: u8
+        // * concatenated own segment roots
+        // * leaf shard blocks: LeafShardBlocksInfo
+
+        let num_own_segment_roots = bytes.split_off(..size_of::<u8>())?;
+        let num_own_segment_roots = usize::from(num_own_segment_roots[0]);
+
+        let own_segment_roots = bytes.split_off(..num_own_segment_roots * SegmentRoot::SIZE)?;
+        // SAFETY: Valid pointer and size, no alignment requirements
+        let own_segment_roots = unsafe {
+            slice::from_raw_parts(
+                own_segment_roots.as_ptr().cast::<[u8; SegmentRoot::SIZE]>(),
+                num_own_segment_roots,
             )
-            .unwrap_or_default();
+        };
+        let own_segment_roots = SegmentRoot::slice_from_repr(own_segment_roots);
+
+        let (leaf_shard_blocks, remainder) = LeafShardBlocksInfo::try_from_bytes(bytes)?;
+
+        let body = Self {
+            own_segment_roots,
+            leaf_shard_blocks,
+        };
+
+        if !body.is_internally_consistent() {
+            return None;
+        }
+
+        Some((body, remainder))
+    }
+
+    /// Check block body's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
+    #[inline]
+    pub fn is_internally_consistent(&self) -> bool {
+        self.leaf_shard_blocks.iter().all(|leaf_shard_block| {
+            let Some(&segment_roots_proof) = leaf_shard_block.segment_roots_proof else {
+                return true;
+            };
+
+            BalancedMerkleTree::<2>::verify(
+                &leaf_shard_block.header.result.body_root,
+                &[segment_roots_proof],
+                0,
+                *compute_segments_root(leaf_shard_block.own_segment_roots),
+            )
+        })
+    }
+
+    /// The same as [`Self::try_from_bytes()`], but for trusted input that skips some consistency
+    /// checks
+    #[inline]
+    pub fn try_from_bytes_unchecked(mut bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
+        // The layout here is as follows:
+        // * number of own segment roots: u8
+        // * concatenated own segment roots
+        // * leaf shard blocks: LeafShardBlocksInfo
+
+        let num_own_segment_roots = bytes.split_off(..size_of::<u8>())?;
+        let num_own_segment_roots = usize::from(num_own_segment_roots[0]);
+
+        let own_segment_roots = bytes.split_off(..num_own_segment_roots * SegmentRoot::SIZE)?;
+        // SAFETY: Valid pointer and size, no alignment requirements
+        let own_segment_roots = unsafe {
+            slice::from_raw_parts(
+                own_segment_roots.as_ptr().cast::<[u8; SegmentRoot::SIZE]>(),
+                num_own_segment_roots,
+            )
+        };
+        let own_segment_roots = SegmentRoot::slice_from_repr(own_segment_roots);
+
+        let (leaf_shard_blocks, remainder) = LeafShardBlocksInfo::try_from_bytes(bytes)?;
+
+        Some((
+            Self {
+                own_segment_roots,
+                leaf_shard_blocks,
+            },
+            remainder,
+        ))
+    }
+
+    /// Segment roots produced by this shard
+    #[inline(always)]
+    pub fn own_segment_roots(&self) -> &'a [SegmentRoot] {
+        self.own_segment_roots
+    }
+
+    /// Leaf shard blocks
+    #[inline(always)]
+    pub fn leaf_shard_blocks(&self) -> &LeafShardBlocksInfo<'a> {
+        &self.leaf_shard_blocks
+    }
+
+    /// Proof for segment roots included in the body
+    #[inline]
+    pub fn segment_roots_proof(&self) -> [u8; 32] {
+        *self.leaf_shard_blocks.headers_root()
+    }
+
+    /// Create an owned version of this body
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedIntermediateShardBody {
+        OwnedIntermediateShardBody::new(
+            self.own_segment_roots.iter().copied(),
+            self.leaf_shard_blocks.iter(),
+        )
+        .expect("`self` is always a valid invariant; qed")
+    }
+
+    /// Compute block body root
+    #[inline]
+    pub fn root(&self) -> Blake3Hash {
+        let root = UnbalancedMerkleTree::compute_root_only::<3, _, _>([
+            *compute_segments_root(self.own_segment_roots),
+            *self.leaf_shard_blocks.segments_root(),
+            *self.leaf_shard_blocks.headers_root(),
+        ])
+        .expect("List is not empty; qed");
 
         Blake3Hash::new(root)
     }
@@ -724,174 +948,48 @@ impl<'a> Transactions<'a> {
     /// Returns default value for an empty collection of shard blocks.
     #[inline]
     pub fn root(&self) -> Blake3Hash {
-        let root =
-            UnbalancedHashedMerkleTree::compute_root_only::<{ u16::MAX as usize + 1 }, _, _>(
-                self.iter().map(|transaction| {
-                    // Hash the hash again so we can prove it, otherwise transactions root is
-                    // indistinguishable from individual transaction roots and can be used to
-                    // confuse verifier
-                    blake3::hash(transaction.hash().as_ref())
-                }),
-            )
-            .unwrap_or_default();
-
-        Blake3Hash::new(root)
-    }
-}
-
-/// Block body that corresponds to an intermediate shard
-#[derive(Debug, Copy, Clone)]
-pub struct IntermediateShardBlockBody<'a> {
-    /// Segment roots produced by this shard
-    pub own_segment_roots: &'a [SegmentRoot],
-    /// Leaf shard blocks
-    pub leaf_shard_blocks: LeafShardBlocksInfo<'a>,
-    /// User transactions
-    pub transactions: Transactions<'a>,
-}
-
-impl<'a> IntermediateShardBlockBody<'a> {
-    /// Create an instance from provided bytes.
-    ///
-    /// `bytes` do not need to be aligned.
-    ///
-    /// Returns an instance and remaining bytes on success.
-    #[inline]
-    pub fn try_from_bytes(mut bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        // The layout here is as follows:
-        // * number of own segment roots: u8
-        // * concatenated own segment roots
-        // * leaf shard blocks: LeafShardBlocksInfo
-        // * transactions: Transactions
-
-        let num_own_segment_roots = bytes.split_off(..size_of::<u8>())?;
-        let num_own_segment_roots = usize::from(num_own_segment_roots[0]);
-
-        let own_segment_roots = bytes.split_off(..num_own_segment_roots * SegmentRoot::SIZE)?;
-        // SAFETY: Valid pointer and size, no alignment requirements
-        let own_segment_roots = unsafe {
-            slice::from_raw_parts(
-                own_segment_roots.as_ptr().cast::<[u8; SegmentRoot::SIZE]>(),
-                num_own_segment_roots,
-            )
-        };
-        let own_segment_roots = SegmentRoot::slice_from_repr(own_segment_roots);
-
-        let (leaf_shard_blocks, remainder) = LeafShardBlocksInfo::try_from_bytes(bytes)?;
-
-        let (transactions, remainder) = Transactions::try_from_bytes(remainder)?;
-
-        let body = Self {
-            own_segment_roots,
-            leaf_shard_blocks,
-            transactions,
-        };
-
-        if !body.is_internally_consistent() {
-            return None;
-        }
-
-        Some((body, remainder))
-    }
-
-    /// Check block body's internal consistency
-    #[inline]
-    pub fn is_internally_consistent(&self) -> bool {
-        self.leaf_shard_blocks.iter().all(|leaf_shard_block| {
-            let Some(&segment_roots_proof) = leaf_shard_block.segment_roots_proof else {
-                return true;
-            };
-
-            BalancedHashedMerkleTree::<2>::verify(
-                &leaf_shard_block.header.result.body_root,
-                &[segment_roots_proof],
-                0,
-                *compute_segments_root(leaf_shard_block.own_segment_roots),
-            )
-        })
-    }
-
-    /// The same as [`Self::try_from_bytes()`], but for trusted input that skips some consistency
-    /// checks
-    #[inline]
-    pub fn try_from_bytes_unchecked(mut bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        // The layout here is as follows:
-        // * number of own segment roots: u8
-        // * concatenated own segment roots
-        // * leaf shard blocks: LeafShardBlocksInfo
-        // * transactions: Transactions
-
-        let num_own_segment_roots = bytes.split_off(..size_of::<u8>())?;
-        let num_own_segment_roots = usize::from(num_own_segment_roots[0]);
-
-        let own_segment_roots = bytes.split_off(..num_own_segment_roots * SegmentRoot::SIZE)?;
-        // SAFETY: Valid pointer and size, no alignment requirements
-        let own_segment_roots = unsafe {
-            slice::from_raw_parts(
-                own_segment_roots.as_ptr().cast::<[u8; SegmentRoot::SIZE]>(),
-                num_own_segment_roots,
-            )
-        };
-        let own_segment_roots = SegmentRoot::slice_from_repr(own_segment_roots);
-
-        let (leaf_shard_blocks, remainder) = LeafShardBlocksInfo::try_from_bytes(bytes)?;
-
-        let (transactions, remainder) = Transactions::try_from_bytes(remainder)?;
-
-        Some((
-            Self {
-                own_segment_roots,
-                leaf_shard_blocks,
-                transactions,
-            },
-            remainder,
-        ))
-    }
-
-    /// Proof for segment roots included in the body
-    #[inline]
-    pub fn segment_roots_proof(&self) -> [u8; 32] {
-        // Merkle Tree is recursive. First two leafs (own and leaf shards record roots) are one
-        // subtree, the second subtree is the proof needed to verify them both.
-        BalancedHashedMerkleTree::compute_root_only(&[
-            *self.leaf_shard_blocks.headers_root(),
-            *self.transactions.root(),
-        ])
-    }
-
-    /// Create an owned version of this body
-    #[inline(always)]
-    #[cfg(feature = "alloc")]
-    pub fn to_owned(
-        self,
-    ) -> Result<OwnedIntermediateShardBlockBody, OwnedIntermediateShardBlockBodyError> {
-        OwnedIntermediateShardBlockBody::from_body(self)
-    }
-
-    /// Compute block body root
-    #[inline]
-    pub fn root(&self) -> Blake3Hash {
-        let root = BalancedHashedMerkleTree::compute_root_only(&[
-            *compute_segments_root(self.own_segment_roots),
-            *self.leaf_shard_blocks.segments_root(),
-            *self.leaf_shard_blocks.headers_root(),
-            *self.transactions.root(),
-        ]);
+        let root = UnbalancedMerkleTree::compute_root_only::<{ u16::MAX as u64 + 1 }, _, _>(
+            self.iter().map(|transaction| {
+                // Hash the hash again so we can prove it, otherwise transactions root is
+                // indistinguishable from individual transaction roots and can be used to
+                // confuse verifier
+                blake3::hash(transaction.hash().as_ref())
+            }),
+        )
+        .unwrap_or_default();
 
         Blake3Hash::new(root)
     }
 }
 
 /// Block body that corresponds to a leaf shard
-#[derive(Debug, Copy, Clone)]
-pub struct LeafShardBlockBody<'a> {
+#[derive(Debug, Copy, Clone, Yokeable)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
+pub struct LeafShardBody<'a> {
     /// Segment roots produced by this shard
-    pub own_segment_roots: &'a [SegmentRoot],
+    own_segment_roots: &'a [SegmentRoot],
     /// User transactions
-    pub transactions: Transactions<'a>,
+    transactions: Transactions<'a>,
 }
 
-impl<'a> LeafShardBlockBody<'a> {
+impl<'a> GenericBlockBody<'a> for LeafShardBody<'a> {
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedLeafShardBody;
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
+    }
+
+    #[inline(always)]
+    fn root(&self) -> Blake3Hash {
+        self.root()
+    }
+}
+
+impl<'a> LeafShardBody<'a> {
     /// Create an instance from provided bytes.
     ///
     /// `bytes` do not need to be aligned.
@@ -931,7 +1029,10 @@ impl<'a> LeafShardBlockBody<'a> {
         Some((body, remainder))
     }
 
-    /// Check block body's internal consistency
+    /// Check block body's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         // Nothing to check here
@@ -971,6 +1072,18 @@ impl<'a> LeafShardBlockBody<'a> {
         ))
     }
 
+    /// Segment roots produced by this shard
+    #[inline(always)]
+    pub fn own_segment_roots(&self) -> &'a [SegmentRoot] {
+        self.own_segment_roots
+    }
+
+    /// User transactions
+    #[inline(always)]
+    pub fn transactions(&self) -> &Transactions<'a> {
+        &self.transactions
+    }
+
     /// Proof for segment roots included in the body
     #[inline]
     pub fn segment_roots_proof(&self) -> [u8; 32] {
@@ -978,16 +1091,24 @@ impl<'a> LeafShardBlockBody<'a> {
     }
 
     /// Create an owned version of this body
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(self) -> Result<OwnedLeafShardBlockBody, OwnedLeafShardBlockBodyError> {
-        OwnedLeafShardBlockBody::from_body(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedLeafShardBody {
+        let mut builder = OwnedLeafShardBody::init(self.own_segment_roots.iter().copied())
+            .expect("`self` is always a valid invariant; qed");
+        for transaction in self.transactions.iter() {
+            builder
+                .add_transaction(transaction)
+                .expect("`self` is always a valid invariant; qed");
+        }
+
+        builder.finish()
     }
 
     /// Compute block body root
     #[inline]
     pub fn root(&self) -> Blake3Hash {
-        let root = BalancedHashedMerkleTree::compute_root_only(&[
+        let root = BalancedMerkleTree::compute_root_only(&[
             *compute_segments_root(self.own_segment_roots),
             *self.transactions.root(),
         ]);
@@ -1003,11 +1124,11 @@ impl<'a> LeafShardBlockBody<'a> {
 #[derive(Debug, Copy, Clone, From)]
 pub enum BlockBody<'a> {
     /// Block body corresponds to the beacon chain
-    BeaconChain(BeaconChainBlockBody<'a>),
+    BeaconChain(BeaconChainBody<'a>),
     /// Block body corresponds to an intermediate shard
-    IntermediateShard(IntermediateShardBlockBody<'a>),
+    IntermediateShard(IntermediateShardBody<'a>),
     /// Block body corresponds to a leaf shard
-    LeafShard(LeafShardBlockBody<'a>),
+    LeafShard(LeafShardBody<'a>),
 }
 
 impl<'a> BlockBody<'a> {
@@ -1021,15 +1142,15 @@ impl<'a> BlockBody<'a> {
     pub fn try_from_bytes(bytes: &'a [u8], shard_kind: ShardKind) -> Option<(Self, &'a [u8])> {
         match shard_kind {
             ShardKind::BeaconChain => {
-                let (body, remainder) = BeaconChainBlockBody::try_from_bytes(bytes)?;
+                let (body, remainder) = BeaconChainBody::try_from_bytes(bytes)?;
                 Some((Self::BeaconChain(body), remainder))
             }
             ShardKind::IntermediateShard => {
-                let (body, remainder) = IntermediateShardBlockBody::try_from_bytes(bytes)?;
+                let (body, remainder) = IntermediateShardBody::try_from_bytes(bytes)?;
                 Some((Self::IntermediateShard(body), remainder))
             }
             ShardKind::LeafShard => {
-                let (body, remainder) = LeafShardBlockBody::try_from_bytes(bytes)?;
+                let (body, remainder) = LeafShardBody::try_from_bytes(bytes)?;
                 Some((Self::LeafShard(body), remainder))
             }
             ShardKind::Phantom | ShardKind::Invalid => {
@@ -1039,7 +1160,10 @@ impl<'a> BlockBody<'a> {
         }
     }
 
-    /// Check block body's internal consistency
+    /// Check block body's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         match self {
@@ -1058,16 +1182,15 @@ impl<'a> BlockBody<'a> {
     ) -> Option<(Self, &'a [u8])> {
         match shard_kind {
             ShardKind::BeaconChain => {
-                let (body, remainder) = BeaconChainBlockBody::try_from_bytes_unchecked(bytes)?;
+                let (body, remainder) = BeaconChainBody::try_from_bytes_unchecked(bytes)?;
                 Some((Self::BeaconChain(body), remainder))
             }
             ShardKind::IntermediateShard => {
-                let (body, remainder) =
-                    IntermediateShardBlockBody::try_from_bytes_unchecked(bytes)?;
+                let (body, remainder) = IntermediateShardBody::try_from_bytes_unchecked(bytes)?;
                 Some((Self::IntermediateShard(body), remainder))
             }
             ShardKind::LeafShard => {
-                let (body, remainder) = LeafShardBlockBody::try_from_bytes_unchecked(bytes)?;
+                let (body, remainder) = LeafShardBody::try_from_bytes_unchecked(bytes)?;
                 Some((Self::LeafShard(body), remainder))
             }
             ShardKind::Phantom | ShardKind::Invalid => {
@@ -1078,10 +1201,14 @@ impl<'a> BlockBody<'a> {
     }
 
     /// Create an owned version of this body
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(self) -> Result<OwnedBlockBody, OwnedBlockBodyError> {
-        OwnedBlockBody::from_body(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedBlockBody {
+        match self {
+            Self::BeaconChain(body) => body.to_owned().into(),
+            Self::IntermediateShard(body) => body.to_owned().into(),
+            Self::LeafShard(body) => body.to_owned().into(),
+        }
     }
 
     /// Compute block body root.

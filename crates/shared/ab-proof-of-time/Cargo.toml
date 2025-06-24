@@ -1,9 +1,9 @@
 [package]
 name = "ab-proof-of-time"
-description = "Subspace proof of time implementation"
+description = "Proof of time implementation"
 license = "0BSD"
 version = "0.1.0"
-authors = ["Rahul Subramaniyam <rahulksnv@gmail.com>"]
+authors = ["Nazar Mokrynskyi <nazar@mokrynskyi.com>"]
 edition = "2024"
 include = [
     "/src",
@@ -17,12 +17,21 @@ all-features = true
 # Necessary for CLI options to work on benches
 bench = false
 
+[[bench]]
+name = "pot"
+harness = false
+
+[[bench]]
+name = "pot-compare-cpu-cores"
+harness = false
+
 [dependencies]
 ab-core-primitives = { workspace = true }
 aes = { workspace = true }
+no-panic = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
+[target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
 cpufeatures = { workspace = true }
 
 [dev-dependencies]
@@ -31,13 +40,11 @@ criterion = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 
-[[bench]]
-name = "pot"
-harness = false
-
-[[bench]]
-name = "pot-compare-cpu-cores"
-harness = false
+[features]
+# Check that code can't panic under any conditions
+no-panic = [
+    "dep:no-panic",
+]
 
 [lints]
 workspace = true

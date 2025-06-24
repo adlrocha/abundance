@@ -1,0 +1,22 @@
+[package]
+name = "ab-client-consensus-common"
+description = "Common client-side consensus utilities"
+license = "0BSD"
+version = "0.0.1"
+authors = ["Nazar Mokrynskyi <nazar@mokrynskyi.com>"]
+edition = "2024"
+include = [
+    "/src",
+    "/Cargo.toml",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+ab-client-api = { workspace = true }
+ab-core-primitives = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

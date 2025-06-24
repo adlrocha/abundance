@@ -8,7 +8,7 @@ use crate::pot::{PotOutput, SlotNumber};
 use crate::sectors::{SectorId, SectorIndex, SectorSlotChallenge};
 use crate::segments::{HistorySize, SegmentIndex, SegmentRoot};
 use ab_io_type::trivial_type::TrivialType;
-use ab_merkle_tree::balanced_hashed::BalancedHashedMerkleTree;
+use ab_merkle_tree::balanced::BalancedMerkleTree;
 use blake3::OUT_LEN;
 use core::fmt;
 use core::simd::Simd;
@@ -191,24 +191,21 @@ impl SolutionRange {
         SolutionDistance::from_u64(if diff < diff2 { diff } else { diff2 })
     }
 
-    /// Derives next solution range based on the total era slots and slot probability
+    /// Derives next solution range
+    #[inline]
     pub fn derive_next(
         self,
-        start_slot: SlotNumber,
-        current_slot: SlotNumber,
+        slots_in_last_era: SlotNumber,
         slot_probability: (u64, u64),
         era_duration: BlockNumber,
     ) -> Self {
-        // calculate total slots within this era
-        let era_slot_count = current_slot - start_slot;
-
         // The idea here is to keep block production at the same pace while space pledged on the
         // network changes. For this, we adjust the previous solution range according to actual and
         // expected number of blocks per era.
         //
         // Below is code analogous to the following, but without using floats:
         // ```rust
-        // let actual_slots_per_block = era_slot_count as f64 / era_duration as f64;
+        // let actual_slots_per_block = slots_in_last_era as f64 / era_duration as f64;
         // let expected_slots_per_block =
         //     slot_probability.1 as f64 / slot_probability.0 as f64;
         // let adjustment_factor =
@@ -220,7 +217,7 @@ impl SolutionRange {
         let current_solution_range = self.0;
         let next_solution_range = u64::try_from(
             u128::from(current_solution_range)
-                .saturating_mul(u128::from(era_slot_count))
+                .saturating_mul(u128::from(slots_in_last_era))
                 .saturating_mul(u128::from(slot_probability.0))
                 / u128::from(u64::from(era_duration))
                 / u128::from(slot_probability.1),
@@ -526,14 +523,14 @@ impl Solution {
             });
         }
 
-        // TODO: This is a workaround for https://github.com/rust-lang/rust/issues/139866 that allows
-        //  the code to compile. Constant 16 is hardcoded here and in `if` branch below for compilation
-        //  to succeed
+        // TODO: This is a workaround for https://github.com/rust-lang/rust/issues/139866 that
+        //  allows the code to compile. Constant 65536 is hardcoded here and below for compilation
+        //  to succeed.
         const _: () = {
             assert!(Record::NUM_S_BUCKETS == 65536);
         };
         // Check that chunk belongs to the record
-        if !BalancedHashedMerkleTree::<65536>::verify(
+        if !BalancedMerkleTree::<65536>::verify(
             &self.record_root,
             &self.chunk_proof,
             usize::from(s_bucket_audit_index),

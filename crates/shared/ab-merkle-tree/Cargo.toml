@@ -1,6 +1,6 @@
 [package]
 name = "ab-merkle-tree"
-description = ""
+description = "Merkle Tree and related data structures"
 license = "0BSD"
 version = "0.0.1"
 authors = ["Nazar Mokrynskyi <nazar@mokrynskyi.com>"]
@@ -13,17 +13,28 @@ include = [
 [package.metadata.docs.rs]
 all-features = true
 
-# TODO: Benches
+[lib]
+# Necessary for CLI options to work on benches
+bench = false
+
+[[bench]]
+name = "merkle_tree"
+harness = false
 
 [dependencies]
 blake3 = { workspace = true }
+no-panic = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 
 [features]
 alloc = []
+no-panic = [
+    "dep:no-panic",
+]
 
 [lints]
 workspace = true

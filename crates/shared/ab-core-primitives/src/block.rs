@@ -5,11 +5,14 @@ pub mod header;
 #[cfg(feature = "alloc")]
 pub mod owned;
 
-use crate::block::body::{
-    BeaconChainBlockBody, BlockBody, IntermediateShardBlockBody, LeafShardBlockBody,
-};
+use crate::block::body::{BeaconChainBody, GenericBlockBody, IntermediateShardBody, LeafShardBody};
 use crate::block::header::{
-    BeaconChainBlockHeader, BlockHeader, IntermediateShardBlockHeader, LeafShardBlockHeader,
+    BeaconChainHeader, GenericBlockHeader, IntermediateShardHeader, LeafShardHeader,
+};
+#[cfg(feature = "alloc")]
+use crate::block::owned::{
+    GenericOwnedBlock, OwnedBeaconChainBlock, OwnedBlock, OwnedIntermediateShardBlock,
+    OwnedLeafShardBlock,
 };
 use crate::hashes::Blake3Hash;
 use crate::shard::ShardKind;
@@ -18,7 +21,7 @@ use crate::solutions::SolutionRange;
 use ::serde::{Deserialize, Serialize};
 use ab_io_type::trivial_type::TrivialType;
 use core::iter::Step;
-use core::mem;
+use core::{fmt, mem};
 use derive_more::{
     Add, AddAssign, AsMut, AsRef, Deref, DerefMut, Display, From, Into, Sub, SubAssign,
 };
@@ -107,6 +110,100 @@ impl BlockNumber {
         self.0.to_le_bytes()
     }
 
+    /// Checked addition, returns `None` on overflow
+    #[inline(always)]
+    pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+        if let Some(n) = self.0.checked_add(rhs.0) {
+            Some(Self(n))
+        } else {
+            None
+        }
+    }
+
+    /// Saturating addition
+    #[inline(always)]
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
+    /// Checked subtraction, returns `None` on underflow
+    #[inline(always)]
+    pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
+        if let Some(n) = self.0.checked_sub(rhs.0) {
+            Some(Self(n))
+        } else {
+            None
+        }
+    }
+
+    /// Saturating subtraction
+    #[inline(always)]
+    pub const fn saturating_sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+}
+
+/// Block timestamp as Unix time in milliseconds
+#[derive(
+    Debug,
+    Display,
+    Default,
+    Copy,
+    Clone,
+    Ord,
+    PartialOrd,
+    Eq,
+    PartialEq,
+    Hash,
+    From,
+    Into,
+    Add,
+    AddAssign,
+    Sub,
+    SubAssign,
+    TrivialType,
+)]
+#[cfg_attr(
+    feature = "scale-codec",
+    derive(Encode, Decode, TypeInfo, MaxEncodedLen)
+)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+#[repr(C)]
+pub struct BlockTimestamp(u64);
+
+impl BlockTimestamp {
+    /// Size in bytes
+    pub const SIZE: usize = size_of::<u64>();
+
+    /// Create new instance
+    #[inline(always)]
+    pub const fn new(ms: u64) -> Self {
+        Self(ms)
+    }
+
+    /// Get internal representation
+    #[inline(always)]
+    pub const fn as_ms(self) -> u64 {
+        self.0
+    }
+
+    /// Checked addition, returns `None` on overflow
+    #[inline(always)]
+    pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+        if let Some(n) = self.0.checked_add(rhs.0) {
+            Some(Self(n))
+        } else {
+            None
+        }
+    }
+
+    /// Saturating addition
+    #[inline(always)]
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
     /// Checked subtraction, returns `None` on underflow
     #[inline(always)]
     pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
@@ -130,6 +227,7 @@ impl BlockNumber {
 /// root of the header rather than a single hash of its contents.
 #[derive(
     Debug,
+    Display,
     Default,
     Copy,
     Clone,
@@ -196,13 +294,41 @@ impl BlockRoot {
     }
 }
 
+/// Generic block
+pub trait GenericBlock<'a>
+where
+    Self: Clone + fmt::Debug,
+{
+    /// Block header type
+    type Header: GenericBlockHeader<'a>;
+    /// Block body type
+    type Body: GenericBlockBody<'a>;
+    /// Owned block
+    #[cfg(feature = "alloc")]
+    type Owned: GenericOwnedBlock<Block<'a> = Self>
+    where
+        Self: 'a;
+
+    /// Get block header
+    fn header(&self) -> &Self::Header;
+
+    /// Get block body
+    fn body(&self) -> &Self::Body;
+
+    /// Turn into owned version
+    #[cfg(feature = "alloc")]
+    fn to_owned(self) -> Self::Owned;
+}
+
 /// Block that corresponds to the beacon chain
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
 pub struct BeaconChainBlock<'a> {
     /// Block header
-    pub header: BeaconChainBlockHeader<'a>,
+    header: BeaconChainHeader<'a>,
     /// Block body
-    pub body: BeaconChainBlockBody<'a>,
+    body: BeaconChainBody<'a>,
 }
 
 impl<'a> BeaconChainBlock<'a> {
@@ -210,16 +336,16 @@ impl<'a> BeaconChainBlock<'a> {
     ///
     /// `bytes` should be 8-bytes aligned.
     ///
-    /// Checks internal consistency of header, body, and block. For unchecked version use
-    /// [`Self::try_from_bytes_unchecked()`].
+    /// Checks internal consistency of header, body, and block, but no consensus verification is
+    /// done. For unchecked version use [`Self::try_from_bytes_unchecked()`].
     ///
     /// Returns an instance and remaining bytes on success, `None` if too few bytes were given,
     /// bytes are not properly aligned or input is otherwise invalid.
     #[inline]
     pub fn try_from_bytes(bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        let (header, remainder) = BeaconChainBlockHeader::try_from_bytes(bytes)?;
+        let (header, remainder) = BeaconChainHeader::try_from_bytes(bytes)?;
         let remainder = align_to_and_ensure_zero_padding::<u128>(remainder)?;
-        let (body, remainder) = BeaconChainBlockBody::try_from_bytes(remainder)?;
+        let (body, remainder) = BeaconChainBody::try_from_bytes(remainder)?;
 
         let block = Self { header, body };
 
@@ -233,19 +359,22 @@ impl<'a> BeaconChainBlock<'a> {
 
     /// Check block's internal consistency.
     ///
+    /// This is usually not necessary to be called explicitly since full internal consistency is
+    /// checked by [`Self::try_from_bytes()`] internally.
+    ///
     /// NOTE: This only checks block-level internal consistency, header and block level internal
     /// consistency is checked separately.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         self.body.root() == self.header.result.body_root
-            && self.header.child_shard_blocks.len() == self.body.intermediate_shard_blocks.len()
+            && self.header.child_shard_blocks().len() == self.body.intermediate_shard_blocks().len()
             && self
                 .header
-                .child_shard_blocks
+                .child_shard_blocks()
                 .iter()
-                .zip(self.body.intermediate_shard_blocks.iter())
+                .zip(self.body.intermediate_shard_blocks().iter())
                 .all(|(child_shard_block_root, intermediate_shard_block)| {
-                    child_shard_block_root == &intermediate_shard_block.header.root()
+                    child_shard_block_root == &*intermediate_shard_block.header.root()
                         && intermediate_shard_block
                             .header
                             .prefix
@@ -258,21 +387,56 @@ impl<'a> BeaconChainBlock<'a> {
     /// checks
     #[inline]
     pub fn try_from_bytes_unchecked(bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        let (header, remainder) = BeaconChainBlockHeader::try_from_bytes_unchecked(bytes)?;
+        let (header, remainder) = BeaconChainHeader::try_from_bytes_unchecked(bytes)?;
         let remainder = align_to_and_ensure_zero_padding::<u128>(remainder)?;
-        let (body, remainder) = BeaconChainBlockBody::try_from_bytes_unchecked(remainder)?;
+        let (body, remainder) = BeaconChainBody::try_from_bytes_unchecked(remainder)?;
 
         Some((Self { header, body }, remainder))
+    }
+
+    /// Create an owned version of this block
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedBeaconChainBlock {
+        OwnedBeaconChainBlock {
+            header: self.header.to_owned(),
+            body: self.body.to_owned(),
+        }
+    }
+}
+
+impl<'a> GenericBlock<'a> for BeaconChainBlock<'a> {
+    type Header = BeaconChainHeader<'a>;
+    type Body = BeaconChainBody<'a>;
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedBeaconChainBlock;
+
+    #[inline(always)]
+    fn header(&self) -> &Self::Header {
+        &self.header
+    }
+
+    #[inline(always)]
+    fn body(&self) -> &Self::Body {
+        &self.body
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
     }
 }
 
 /// Block that corresponds to an intermediate shard
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
 pub struct IntermediateShardBlock<'a> {
     /// Block header
-    pub header: IntermediateShardBlockHeader<'a>,
+    header: IntermediateShardHeader<'a>,
     /// Block body
-    pub body: IntermediateShardBlockBody<'a>,
+    body: IntermediateShardBody<'a>,
 }
 
 impl<'a> IntermediateShardBlock<'a> {
@@ -280,16 +444,16 @@ impl<'a> IntermediateShardBlock<'a> {
     ///
     /// `bytes` should be 8-bytes aligned.
     ///
-    /// Checks internal consistency of header, body, and block. For unchecked version use
-    /// [`Self::try_from_bytes_unchecked()`].
+    /// Checks internal consistency of header, body, and block, but no consensus verification is
+    /// done. For unchecked version use [`Self::try_from_bytes_unchecked()`].
     ///
     /// Returns an instance and remaining bytes on success, `None` if too few bytes were given,
     /// bytes are not properly aligned or input is otherwise invalid.
     #[inline]
     pub fn try_from_bytes(bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        let (header, remainder) = IntermediateShardBlockHeader::try_from_bytes(bytes)?;
+        let (header, remainder) = IntermediateShardHeader::try_from_bytes(bytes)?;
         let remainder = align_to_and_ensure_zero_padding::<u128>(remainder)?;
-        let (body, remainder) = IntermediateShardBlockBody::try_from_bytes(remainder)?;
+        let (body, remainder) = IntermediateShardBody::try_from_bytes(remainder)?;
 
         let block = Self { header, body };
 
@@ -303,19 +467,22 @@ impl<'a> IntermediateShardBlock<'a> {
 
     /// Check block's internal consistency.
     ///
+    /// This is usually not necessary to be called explicitly since full internal consistency is
+    /// checked by [`Self::try_from_bytes()`] internally.
+    ///
     /// NOTE: This only checks block-level internal consistency, header and block level internal
     /// consistency is checked separately.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         self.body.root() == self.header.result.body_root
-            && self.header.child_shard_blocks.len() == self.body.leaf_shard_blocks.len()
+            && self.header.child_shard_blocks().len() == self.body.leaf_shard_blocks().len()
             && self
                 .header
-                .child_shard_blocks
+                .child_shard_blocks()
                 .iter()
-                .zip(self.body.leaf_shard_blocks.iter())
+                .zip(self.body.leaf_shard_blocks().iter())
                 .all(|(child_shard_block_root, leaf_shard_block)| {
-                    child_shard_block_root == &leaf_shard_block.header.root()
+                    child_shard_block_root == &*leaf_shard_block.header.root()
                         && leaf_shard_block
                             .header
                             .prefix
@@ -328,21 +495,56 @@ impl<'a> IntermediateShardBlock<'a> {
     /// checks
     #[inline]
     pub fn try_from_bytes_unchecked(bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        let (header, remainder) = IntermediateShardBlockHeader::try_from_bytes_unchecked(bytes)?;
+        let (header, remainder) = IntermediateShardHeader::try_from_bytes_unchecked(bytes)?;
         let remainder = align_to_and_ensure_zero_padding::<u128>(remainder)?;
-        let (body, remainder) = IntermediateShardBlockBody::try_from_bytes_unchecked(remainder)?;
+        let (body, remainder) = IntermediateShardBody::try_from_bytes_unchecked(remainder)?;
 
         Some((Self { header, body }, remainder))
+    }
+
+    /// Create an owned version of this block
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedIntermediateShardBlock {
+        OwnedIntermediateShardBlock {
+            header: self.header.to_owned(),
+            body: self.body.to_owned(),
+        }
+    }
+}
+
+impl<'a> GenericBlock<'a> for IntermediateShardBlock<'a> {
+    type Header = IntermediateShardHeader<'a>;
+    type Body = IntermediateShardBody<'a>;
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedIntermediateShardBlock;
+
+    #[inline(always)]
+    fn header(&self) -> &Self::Header {
+        &self.header
+    }
+
+    #[inline(always)]
+    fn body(&self) -> &Self::Body {
+        &self.body
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
     }
 }
 
 /// Block that corresponds to a leaf shard
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
 pub struct LeafShardBlock<'a> {
     /// Block header
-    pub header: LeafShardBlockHeader<'a>,
+    header: LeafShardHeader<'a>,
     /// Block body
-    pub body: LeafShardBlockBody<'a>,
+    body: LeafShardBody<'a>,
 }
 
 impl<'a> LeafShardBlock<'a> {
@@ -350,16 +552,16 @@ impl<'a> LeafShardBlock<'a> {
     ///
     /// `bytes` should be 8-bytes aligned.
     ///
-    /// Checks internal consistency of header, body, and block. For unchecked version use
-    /// [`Self::try_from_bytes_unchecked()`].
+    /// Checks internal consistency of header, body, and block, but no consensus verification is
+    /// done. For unchecked version use [`Self::try_from_bytes_unchecked()`].
     ///
     /// Returns an instance and remaining bytes on success, `None` if too few bytes were given,
     /// bytes are not properly aligned or input is otherwise invalid.
     #[inline]
     pub fn try_from_bytes(bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        let (header, remainder) = LeafShardBlockHeader::try_from_bytes(bytes)?;
+        let (header, remainder) = LeafShardHeader::try_from_bytes(bytes)?;
         let remainder = align_to_and_ensure_zero_padding::<u128>(remainder)?;
-        let (body, remainder) = LeafShardBlockBody::try_from_bytes(remainder)?;
+        let (body, remainder) = LeafShardBody::try_from_bytes(remainder)?;
 
         let block = Self { header, body };
 
@@ -373,6 +575,9 @@ impl<'a> LeafShardBlock<'a> {
 
     /// Check block's internal consistency.
     ///
+    /// This is usually not necessary to be called explicitly since full internal consistency is
+    /// checked by [`Self::try_from_bytes()`] internally.
+    ///
     /// NOTE: This only checks block-level internal consistency, header and block level internal
     /// consistency is checked separately.
     #[inline]
@@ -384,16 +589,52 @@ impl<'a> LeafShardBlock<'a> {
     /// checks
     #[inline]
     pub fn try_from_bytes_unchecked(bytes: &'a [u8]) -> Option<(Self, &'a [u8])> {
-        let (header, remainder) = LeafShardBlockHeader::try_from_bytes_unchecked(bytes)?;
+        let (header, remainder) = LeafShardHeader::try_from_bytes_unchecked(bytes)?;
         let remainder = align_to_and_ensure_zero_padding::<u128>(remainder)?;
-        let (body, remainder) = LeafShardBlockBody::try_from_bytes_unchecked(remainder)?;
+        let (body, remainder) = LeafShardBody::try_from_bytes_unchecked(remainder)?;
 
         Some((Self { header, body }, remainder))
+    }
+
+    /// Create an owned version of this block
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedLeafShardBlock {
+        OwnedLeafShardBlock {
+            header: self.header.to_owned(),
+            body: self.body.to_owned(),
+        }
+    }
+}
+
+impl<'a> GenericBlock<'a> for LeafShardBlock<'a> {
+    type Header = LeafShardHeader<'a>;
+    type Body = LeafShardBody<'a>;
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedLeafShardBlock;
+
+    #[inline(always)]
+    fn header(&self) -> &Self::Header {
+        &self.header
+    }
+
+    #[inline(always)]
+    fn body(&self) -> &Self::Body {
+        &self.body
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
     }
 }
 
 /// Block that contains [`BlockHeader`] and [`BlockBody`]
-#[derive(Debug, Copy, Clone, From)]
+///
+/// [`BlockHeader`]: crate::block::header::BlockHeader
+/// [`BlockBody`]: crate::block::body::BlockBody
+#[derive(Debug, Clone, From)]
 pub enum Block<'a> {
     /// Block corresponds to the beacon chain
     BeaconChain(BeaconChainBlock<'a>),
@@ -408,8 +649,8 @@ impl<'a> Block<'a> {
     ///
     /// `bytes` should be 16-byte aligned.
     ///
-    /// Header and body will be checked for basic internal consistencies body and that they match
-    /// each other, but no consensus verification is done.
+    /// Checks internal consistency of header, body, and block, but no consensus verification is
+    /// done. For unchecked version use [`Self::try_from_bytes_unchecked()`].
     ///
     /// Returns an instance and remaining bytes on success, `None` if too few bytes were given,
     /// bytes are not properly aligned or input is otherwise invalid.
@@ -437,14 +678,17 @@ impl<'a> Block<'a> {
 
     /// Check block's internal consistency.
     ///
+    /// This is usually not necessary to be called explicitly since full internal consistency is
+    /// checked by [`Self::try_from_bytes()`] internally.
+    ///
     /// NOTE: This only checks block-level internal consistency, header and block level internal
     /// consistency is checked separately.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         match self {
-            Self::BeaconChain(body) => body.is_internally_consistent(),
-            Self::IntermediateShard(body) => body.is_internally_consistent(),
-            Self::LeafShard(body) => body.is_internally_consistent(),
+            Self::BeaconChain(block) => block.is_internally_consistent(),
+            Self::IntermediateShard(block) => block.is_internally_consistent(),
+            Self::LeafShard(block) => block.is_internally_consistent(),
         }
     }
 
@@ -476,23 +720,14 @@ impl<'a> Block<'a> {
         }
     }
 
-    /// Get block header
+    /// Create an owned version of this block
+    #[cfg(feature = "alloc")]
     #[inline(always)]
-    pub fn header(&self) -> BlockHeader<'a> {
+    pub fn to_owned(self) -> OwnedBlock {
         match self {
-            Self::BeaconChain(block) => BlockHeader::BeaconChain(block.header),
-            Self::IntermediateShard(block) => BlockHeader::IntermediateShard(block.header),
-            Self::LeafShard(block) => BlockHeader::LeafShard(block.header),
-        }
-    }
-
-    /// Get block body
-    #[inline(always)]
-    pub fn body(&self) -> BlockBody<'a> {
-        match self {
-            Self::BeaconChain(block) => BlockBody::BeaconChain(block.body),
-            Self::IntermediateShard(block) => BlockBody::IntermediateShard(block.body),
-            Self::LeafShard(block) => BlockBody::LeafShard(block.body),
+            Self::BeaconChain(block) => block.to_owned().into(),
+            Self::IntermediateShard(block) => block.to_owned().into(),
+            Self::LeafShard(block) => block.to_owned().into(),
         }
     }
 }

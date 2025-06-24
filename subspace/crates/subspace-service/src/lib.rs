@@ -22,11 +22,16 @@ use crate::sync_from_dsn::DsnPieceGetter;
 use crate::sync_from_dsn::piece_validator::SegmentRootPieceValidator;
 use crate::sync_from_dsn::snap_sync::snap_sync;
 use crate::task_spawner::SpawnTasksParams;
+use ab_client_api::ChainSyncStatus;
+use ab_client_proof_of_time::source::PotSourceWorker;
+use ab_client_proof_of_time::source::timekeeper::Timekeeper;
+use ab_client_proof_of_time::verifier::PotVerifier;
 use ab_core_primitives::block::{BlockNumber, BlockRoot};
 use ab_core_primitives::pot::PotSeed;
 use ab_erasure_coding::ErasureCoding;
 use ab_proof_of_space::Table;
 use async_lock::Semaphore;
+use core_affinity::CoreId;
 use frame_system_rpc_runtime_api::AccountNonceApi;
 use futures::channel::oneshot;
 use jsonrpsee::RpcModule;
@@ -40,7 +45,6 @@ use sc_consensus::{
     BasicQueue, BlockCheckParams, BlockImport, BlockImportParams, BoxBlockImport,
     DefaultImportQueue, ImportQueue, ImportResult,
 };
-use sc_consensus_slots::SlotProportion;
 use sc_consensus_subspace::SubspaceLink;
 use sc_consensus_subspace::archiver::{
     ArchivedSegmentNotification, SegmentHeadersStore, create_subspace_archiver,
@@ -54,11 +58,12 @@ use sc_consensus_subspace::slot_worker::{
 use sc_consensus_subspace::verifier::{SubspaceVerifier, SubspaceVerifierOptions};
 use sc_network::service::traits::NetworkService;
 use sc_network::{NetworkWorker, NotificationMetrics, Roles};
+use sc_network_sync::SyncingService;
 use sc_network_sync::engine::SyncingEngine;
 use sc_network_sync::service::network::NetworkServiceProvider;
-use sc_proof_of_time::source::gossip::pot_gossip_peers_set_config;
-use sc_proof_of_time::source::{PotSlotInfo, PotSourceWorker};
-use sc_proof_of_time::verifier::PotVerifier;
+use sc_proof_of_time::source::block_import::BestBlockPotSource;
+use sc_proof_of_time::source::gossip::{PotGossipWorker, pot_gossip_peers_set_config};
+use sc_proof_of_time::source::init_pot_state;
 use sc_service::error::Error as ServiceError;
 use sc_service::{
     BuildNetworkAdvancedParams, Configuration, NetworkStarter, TaskManager,
@@ -68,6 +73,7 @@ use sc_transaction_pool::TransactionPoolHandle;
 use sp_api::{ApiExt, ConstructRuntimeApi, Metadata, ProvideRuntimeApi};
 use sp_block_builder::BlockBuilder;
 use sp_blockchain::HeaderMetadata;
+use sp_consensus::SyncOracle;
 use sp_consensus::block_validation::DefaultBlockAnnounceValidator;
 use sp_consensus_subspace::SubspaceApi;
 use sp_core::traits::SpawnEssentialNamed;
@@ -77,13 +83,14 @@ use sp_transaction_pool::runtime_api::TaggedTransactionQueue;
 use static_assertions::const_assert;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::Duration;
 use subspace_networking::libp2p::multiaddr::Protocol;
 use subspace_networking::utils::piece_provider::PieceProvider;
 use subspace_runtime_primitives::opaque::Block;
 use subspace_runtime_primitives::{AccountId, Balance, Nonce};
-use tokio::sync::broadcast;
-use tracing::{Instrument, debug, error, info};
+use thread_priority::{ThreadPriority, set_current_thread_priority};
+use tracing::{Instrument, Span, debug, error, info, warn};
 pub use utils::wait_for_block_import;
 
 // There are multiple places where it is assumed that node is running on 64-bit system, refuse to
@@ -161,15 +168,7 @@ where
 }
 
 /// Host functions required for Subspace
-#[cfg(not(feature = "runtime-benchmarks"))]
 pub type HostFunctions = (sp_io::SubstrateHostFunctions,);
-
-/// Host functions required for Subspace
-#[cfg(feature = "runtime-benchmarks")]
-pub type HostFunctions = (
-    sp_io::SubstrateHostFunctions,
-    frame_benchmarking::benchmarking::HostFunctions,
-);
 
 /// Runtime executor for Subspace
 pub type RuntimeExecutor = sc_executor::WasmExecutor<HostFunctions>;
@@ -331,7 +330,6 @@ where
         client: client.clone(),
         chain_constants,
         sync_target_block_number: Arc::clone(&sync_target_block_number),
-        is_authoring_blocks: config.role.is_authority(),
         pot_verifier: pot_verifier.clone(),
     });
 
@@ -387,8 +385,6 @@ where
     pub sync_service: Arc<sc_network_sync::SyncingService<Block>>,
     /// Full client backend.
     pub backend: Arc<FullBackend>,
-    /// Pot slot info stream.
-    pub pot_slot_info_stream: broadcast::Receiver<PotSlotInfo>,
     /// New slot stream.
     /// Note: this is currently used to send solutions from the farmer during tests.
     pub new_slot_notification_stream: SubspaceNotificationStream<NewSlotNotification>,
@@ -407,13 +403,47 @@ where
 
 type FullNode<RuntimeApi> = NewFull<FullClient<RuntimeApi>>;
 
+#[derive(Clone)]
+struct SubstrateChainSyncInfo {
+    sync_oracle: SubspaceSyncOracle<Arc<SyncingService<Block>>>,
+    sync_target_block_number: Arc<AtomicU64>,
+}
+
+impl ChainSyncStatus for SubstrateChainSyncInfo {
+    #[inline(always)]
+    fn target_block_number(&self) -> BlockNumber {
+        BlockNumber::new(self.sync_target_block_number.load(Ordering::Relaxed))
+    }
+
+    #[inline(always)]
+    fn is_syncing(&self) -> bool {
+        self.sync_oracle.is_major_syncing()
+    }
+
+    #[inline(always)]
+    fn is_offline(&self) -> bool {
+        self.sync_oracle.is_offline()
+    }
+}
+
+impl SubstrateChainSyncInfo {
+    fn new(
+        sync_oracle: SubspaceSyncOracle<Arc<SyncingService<Block>>>,
+        sync_target_block_number: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            sync_oracle,
+            sync_target_block_number,
+        }
+    }
+}
+
 /// Builds a new service for a full client.
 pub async fn new_full<PosTable, RuntimeApi>(
     mut config: SubspaceConfiguration,
     partial_components: PartialComponents<RuntimeApi>,
     prometheus_registry: Option<&mut Registry>,
     enable_rpc_extensions: bool,
-    block_proposal_slot_portion: SlotProportion,
 ) -> Result<FullNode<RuntimeApi>, Error>
 where
     PosTable: Table,
@@ -667,6 +697,9 @@ where
         sync_service.clone(),
     );
 
+    let chain_sync_status =
+        SubstrateChainSyncInfo::new(sync_oracle.clone(), Arc::clone(&sync_target_block_number));
+
     let subspace_archiver = tokio::task::block_in_place(|| {
         create_subspace_archiver(
             segment_headers_store.clone(),
@@ -763,26 +796,71 @@ where
         }
     }
 
-    let backoff_authoring_blocks: Option<()> = None;
-
     let new_slot_notification_stream = subspace_link.new_slot_notification_stream();
     let reward_signing_notification_stream = subspace_link.reward_signing_notification_stream();
     let block_importing_notification_stream = subspace_link.block_importing_notification_stream();
     let archived_segment_notification_stream = subspace_link.archived_segment_notification_stream();
 
-    let (pot_source_worker, pot_gossip_worker, pot_slot_info_stream) = PotSourceWorker::new(
-        config.is_timekeeper,
-        config.timekeeper_cpu_cores,
-        client.clone(),
+    let pot_state = Arc::new(
+        init_pot_state(client.clone(), pot_verifier.clone())
+            .map_err(|error| Error::Other(error.into()))?,
+    );
+
+    let mut timekeeper_proof_receiver = None;
+    if config.is_timekeeper {
+        let span = Span::current();
+        let (timekeeper_source, proof_receiver) =
+            Timekeeper::new(Arc::clone(&pot_state), pot_verifier.clone());
+        timekeeper_proof_receiver.replace(proof_receiver);
+
+        thread::Builder::new()
+            .name("timekeeper".to_string())
+            .spawn(move || {
+                let _guard = span.enter();
+
+                if let Some(core) = config.timekeeper_cpu_cores.into_iter().next()
+                    && !core_affinity::set_for_current(CoreId { id: core })
+                {
+                    warn!(
+                        %core,
+                        "Failed to set core affinity, timekeeper will run on random CPU \
+                        core",
+                    );
+                }
+
+                if let Err(error) = set_current_thread_priority(ThreadPriority::Max) {
+                    warn!(
+                        %error,
+                        "Failed to set thread priority, timekeeper performance may be \
+                        negatively impacted by other software running on this machine",
+                    );
+                }
+
+                if let Err(error) = timekeeper_source.run() {
+                    error!(%error, "Timekeeper exited with an error");
+                }
+            })
+            .expect("Thread creation must not panic");
+    }
+    let (pot_gossip_worker, to_gossip_sender, from_gossip_receiver) = PotGossipWorker::<Block>::new(
         pot_verifier.clone(),
+        Arc::clone(&pot_state),
         Arc::clone(&network_service),
         pot_gossip_notification_service,
         sync_service.clone(),
         sync_oracle.clone(),
-    )
-    .map_err(|error| Error::Other(error.into()))?;
+    );
+    let (best_block_pot_source, best_block_pot_info_receiver) =
+        BestBlockPotSource::new(client.clone()).map_err(|error| Error::Other(error.into()))?;
 
-    let additional_pot_slot_info_stream = pot_source_worker.subscribe_pot_slot_info_stream();
+    let (pot_source_worker, pot_slot_info_stream) = PotSourceWorker::new(
+        timekeeper_proof_receiver,
+        to_gossip_sender,
+        from_gossip_receiver,
+        best_block_pot_info_receiver,
+        chain_sync_status.clone(),
+        pot_state,
+    );
 
     task_manager
         .spawn_essential_handle()
@@ -790,6 +868,11 @@ where
     task_manager
         .spawn_essential_handle()
         .spawn("pot-gossip", Some("pot"), pot_gossip_worker.run());
+    task_manager.spawn_essential_handle().spawn(
+        "pot-best-block",
+        Some("pot"),
+        best_block_pot_source.run(),
+    );
 
     if config.base.role.is_authority() || config.force_new_slot_notifications {
         let proposer_factory = ProposerFactory::new(
@@ -799,22 +882,6 @@ where
             substrate_prometheus_registry.as_ref(),
             None,
         );
-
-        let subspace_slot_worker =
-            SubspaceSlotWorker::<PosTable, _, _, _, _, _, _, _>::new(SubspaceSlotWorkerOptions {
-                client: client.clone(),
-                env: proposer_factory,
-                block_import,
-                sync_oracle: sync_oracle.clone(),
-                justification_sync_link: sync_service.clone(),
-                force_authoring: config.base.force_authoring,
-                backoff_authoring_blocks,
-                subspace_link: subspace_link.clone(),
-                segment_headers_store: segment_headers_store.clone(),
-                block_proposal_slot_portion,
-                max_block_proposal_slot_portion: None,
-                pot_verifier,
-            });
 
         let create_inherent_data_providers = {
             let client = client.clone();
@@ -844,16 +911,21 @@ where
             }
         };
 
-        info!(target: "subspace", "🧑‍🌾 Starting Subspace Authorship worker");
-        let slot_worker_task = sc_proof_of_time::start_slot_worker(
-            subspace_link.chain_constants().slot_duration(),
-            client.clone(),
-            select_chain.clone(),
-            subspace_slot_worker,
-            sync_oracle.clone(),
-            create_inherent_data_providers,
-            pot_slot_info_stream,
-        );
+        let subspace_slot_worker =
+            SubspaceSlotWorker::<PosTable, _, _, _, _, _, _>::new(SubspaceSlotWorkerOptions {
+                client: client.clone(),
+                env: proposer_factory,
+                block_import,
+                chain_sync_status: chain_sync_status.clone(),
+                create_inherent_data_providers,
+                force_authoring: config.base.force_authoring,
+                subspace_link: subspace_link.clone(),
+                segment_headers_store: segment_headers_store.clone(),
+                pot_verifier,
+            });
+
+        info!(target: "subspace", "🧑🌾 Starting Subspace Authorship worker");
+        let slot_worker_task = subspace_slot_worker.run(pot_slot_info_stream);
 
         // Subspace authoring task is considered essential, i.e. if it fails we take down the
         // service with it.
@@ -888,7 +960,7 @@ where
                         .clone(),
                     dsn_bootstrap_nodes: dsn_bootstrap_nodes.clone(),
                     segment_headers_store: segment_headers_store.clone(),
-                    sync_oracle: sync_oracle.clone(),
+                    chain_sync_status: chain_sync_status.clone(),
                     erasure_coding: subspace_link.erasure_coding().clone(),
                 };
 
@@ -909,7 +981,6 @@ where
         network_service,
         sync_service,
         backend,
-        pot_slot_info_stream: additional_pot_slot_info_stream,
         new_slot_notification_stream,
         reward_signing_notification_stream,
         block_importing_notification_stream,

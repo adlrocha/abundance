@@ -1,0 +1,31 @@
+[package]
+name = "ab-client-block-import"
+description = "Block building implementation"
+license = "0BSD"
+version = "0.0.1"
+authors = ["Nazar Mokrynskyi <nazar@mokrynskyi.com>"]
+edition = "2024"
+include = [
+    "/src",
+    "/Cargo.toml",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+ab-client-api = { workspace = true }
+ab-client-block-verification = { workspace = true }
+ab-core-primitives = { workspace = true, features = ["alloc"] }
+ab-proof-of-space = { workspace = true }
+anyhow = { workspace = true }
+async-lock = { workspace = true, features = ["std"] }
+parking_lot = { workspace = true }
+rclite = { workspace = true }
+send-future = { workspace = true }
+stable_deref_trait = { workspace = true }
+thiserror = { workspace = true }
+yoke = { workspace = true }
+
+[lints]
+workspace = true

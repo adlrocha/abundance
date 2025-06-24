@@ -4,11 +4,10 @@ mod shared;
 use crate::commands::run::consensus::{
     ConsensusChainConfiguration, ConsensusChainOptions, create_consensus_chain_configuration,
 };
-use crate::{Error, PosTable, set_default_ss58_version};
+use crate::{Error, PosTable};
 use clap::Parser;
 use futures::FutureExt;
 use sc_cli::Signals;
-use sc_consensus_slots::SlotProportion;
 use sc_storage_monitor::StorageMonitorService;
 use std::env;
 use subspace_logging::init_logger;
@@ -64,8 +63,6 @@ pub async fn run(run_options: RunOptions) -> Result<(), Error> {
         mut prometheus_configuration,
     } = create_consensus_chain_configuration(consensus)?;
 
-    set_default_ss58_version(subspace_configuration.chain_spec.as_ref());
-
     let base_path = subspace_configuration.base_path.path().to_path_buf();
 
     info!("Subspace");
@@ -106,7 +103,6 @@ pub async fn run(run_options: RunOptions) -> Result<(), Error> {
                         &mut prometheus_configuration.prometheus_registry
                     }),
                 true,
-                SlotProportion::new(3f32 / 4f32),
             );
 
             full_node_fut.await.map_err(|error| {

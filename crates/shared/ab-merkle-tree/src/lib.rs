@@ -1,18 +1,20 @@
-//! Merkle Tree implementations.
+//! Merkle Tree and related data structures.
 //!
-//! This crate contains several Merkle Tree implementations that are a subset of each other.
+//! This crate contains several Merkle Tree implementations and related data structures, many of
+//! which are a subset of each other.
 //!
-//! Currently [`BalancedHashedMerkleTree`] and [`UnbalancedHashedMerkleTree`] are available, with
-//! [`BalancedHashedMerkleTree`] being an optimized special case of [`UnbalancedHashedMerkleTree`]
-//! and both return the same results for identical inputs.
+//! Currently [`BalancedMerkleTree`], [`UnbalancedMerkleTree`] and [`MerkleMountainRange`] are
+//! available. [`BalancedMerkleTree`] is an optimized special case of [`UnbalancedMerkleTree`],
+//! which is in turn an optimized version of [`MerkleMountainRange`] and all 3 will return the same
+//! results for identical inputs.
 //!
-//! [`BalancedHashedMerkleTree`]: balanced_hashed::BalancedHashedMerkleTree
-//! [`UnbalancedHashedMerkleTree`]: unbalanced_hashed::UnbalancedHashedMerkleTree
+//! [`BalancedMerkleTree`]: balanced::BalancedMerkleTree
+//! [`MerkleMountainRange`]: mmr::MerkleMountainRange
+//! [`UnbalancedMerkleTree`]: unbalanced::UnbalancedMerkleTree
 
 #![expect(incomplete_features, reason = "generic_const_exprs")]
 #![feature(
     array_chunks,
-    generic_arg_infer,
     generic_const_exprs,
     maybe_uninit_slice,
     maybe_uninit_uninit_array_transpose,
@@ -23,8 +25,9 @@
 
 // TODO: Consider domains-specific internal node separator and inclusion of tree size into hashing
 //  key
-pub mod balanced_hashed;
-pub mod unbalanced_hashed;
+pub mod balanced;
+pub mod mmr;
+pub mod unbalanced;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -43,6 +46,7 @@ pub const INNER_NODE_DOMAIN_SEPARATOR: [u8; KEY_LEN] = [
 /// Helper function to hash two nodes together using [`blake3::keyed_hash()`] and
 /// [`INNER_NODE_DOMAIN_SEPARATOR`]
 #[inline(always)]
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
 pub fn hash_pair(left: &[u8; OUT_LEN], right: &[u8; OUT_LEN]) -> [u8; OUT_LEN] {
     let mut pair = [0u8; OUT_LEN * 2];
     pair[..OUT_LEN].copy_from_slice(left);

@@ -5,11 +5,10 @@ pub mod owned;
 
 #[cfg(feature = "alloc")]
 use crate::block::header::owned::{
-    OwnedBeaconChainBlockHeader, OwnedBeaconChainBlockHeaderError, OwnedBlockHeader,
-    OwnedBlockHeaderError, OwnedIntermediateShardBlockHeader,
-    OwnedIntermediateShardBlockHeaderError, OwnedLeafShardBlockHeader,
+    GenericOwnedBlockHeader, OwnedBeaconChainHeader, OwnedBlockHeader,
+    OwnedIntermediateShardHeader, OwnedLeafShardHeader,
 };
-use crate::block::{BlockNumber, BlockRoot};
+use crate::block::{BlockNumber, BlockRoot, BlockTimestamp};
 use crate::ed25519::{Ed25519PublicKey, Ed25519Signature};
 use crate::hashes::Blake3Hash;
 use crate::pot::{PotOutput, PotParametersChange, SlotNumber};
@@ -17,10 +16,10 @@ use crate::segments::SuperSegmentRoot;
 use crate::shard::{ShardIndex, ShardKind};
 use crate::solutions::{Solution, SolutionRange};
 use ab_io_type::trivial_type::TrivialType;
-use ab_merkle_tree::unbalanced_hashed::UnbalancedHashedMerkleTree;
+use ab_merkle_tree::unbalanced::UnbalancedMerkleTree;
 use core::num::NonZeroU32;
 use core::ops::Deref;
-use core::slice;
+use core::{fmt, slice};
 use derive_more::{Deref, From};
 #[cfg(feature = "scale-codec")]
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
@@ -28,6 +27,31 @@ use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use yoke::Yokeable;
+
+/// Generic block header
+pub trait GenericBlockHeader<'a>
+where
+    Self: Clone + fmt::Debug + Deref<Target = SharedBlockHeader<'a>>,
+{
+    /// Owned block header
+    #[cfg(feature = "alloc")]
+    type Owned: GenericOwnedBlockHeader<Header<'a> = Self>
+    where
+        Self: 'a;
+
+    /// Turn into owned version
+    #[cfg(feature = "alloc")]
+    fn to_owned(self) -> Self::Owned;
+
+    /// Compute block root out of this header.
+    ///
+    /// Block root is a Merkle Tree Root. The leaves are derived from individual fields in
+    /// [`SharedBlockHeader`] and other fields of this enum in the declaration order.
+    ///
+    /// Note that this method does a bunch of hashing and if hash is needed often, should be cached.
+    fn root(&self) -> impl Deref<Target = BlockRoot>;
+}
 
 /// Block header prefix.
 ///
@@ -41,17 +65,14 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[repr(C)]
 pub struct BlockHeaderPrefix {
-    /// Block version
-    pub version: u64,
     /// Block number
     pub number: BlockNumber,
     /// Shard index
     pub shard_index: ShardIndex,
-    /// Padding for data structure alignment
-    pub padding: [u8; 4],
-    /// Unix timestamp in ms
-    // TODO: New type?
-    pub timestamp: u64,
+    /// Padding for data structure alignment, contents must be all zeroes
+    pub padding_0: [u8; 4],
+    /// Block timestamp
+    pub timestamp: BlockTimestamp,
     /// Root of the parent block
     pub parent_root: BlockRoot,
     /// MMR root of all block roots, including `parent_root`
@@ -60,9 +81,6 @@ pub struct BlockHeaderPrefix {
 }
 
 impl BlockHeaderPrefix {
-    /// The only supported block version right now
-    pub const BLOCK_VERSION: u64 = 0;
-
     /// Hash of the block header prefix, part of the eventual block root
     pub fn hash(&self) -> Blake3Hash {
         // TODO: Keyed hash
@@ -123,7 +141,7 @@ impl BlockHeaderBeaconChainInfo {
 }
 
 /// Consensus parameters (on the beacon chain)
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(
     feature = "scale-codec",
     derive(Encode, Decode, TypeInfo, MaxEncodedLen)
@@ -137,7 +155,7 @@ pub struct BlockHeaderFixedConsensusParameters {
     ///
     /// Corresponds to the slot that is right after the parent block's slot.
     /// It can change before the slot of this block (see [`PotParametersChange`]).
-    pub pot_slot_iterations: NonZeroU32,
+    pub slot_iterations: NonZeroU32,
 }
 
 impl BlockHeaderFixedConsensusParameters {
@@ -165,18 +183,18 @@ impl BlockHeaderFixedConsensusParameters {
         ]);
 
         let pot_slot_iterations = bytes.split_off(..size_of::<u32>())?;
-        let pot_slot_iterations = u32::from_le_bytes([
+        let slot_iterations = u32::from_le_bytes([
             pot_slot_iterations[0],
             pot_slot_iterations[1],
             pot_slot_iterations[2],
             pot_slot_iterations[3],
         ]);
-        let pot_slot_iterations = NonZeroU32::new(pot_slot_iterations)?;
+        let slot_iterations = NonZeroU32::new(slot_iterations)?;
 
         Some((
             Self {
                 solution_range,
-                pot_slot_iterations,
+                slot_iterations,
             },
             bytes,
         ))
@@ -186,7 +204,7 @@ impl BlockHeaderFixedConsensusParameters {
 /// A mirror of [`PotParametersChange`] for block header purposes.
 ///
 /// Use [`From`] or [`Into`] for converting into [`PotParametersChange`] before use.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(C, packed)]
 pub struct BlockHeaderPotParametersChange {
     // TODO: Reduce this to `u16` or even `u8` since it is always an offset relatively to current
@@ -209,6 +227,23 @@ impl From<BlockHeaderPotParametersChange> for PotParametersChange {
         } = value;
 
         PotParametersChange {
+            slot,
+            slot_iterations,
+            entropy,
+        }
+    }
+}
+
+impl From<PotParametersChange> for BlockHeaderPotParametersChange {
+    #[inline(always)]
+    fn from(value: PotParametersChange) -> Self {
+        let PotParametersChange {
+            slot,
+            slot_iterations,
+            entropy,
+        } = value;
+
+        BlockHeaderPotParametersChange {
             slot,
             slot_iterations,
             entropy,
@@ -244,9 +279,35 @@ impl BlockHeaderPotParametersChange {
     }
 }
 
-/// Consensus parameters (on the beacon chain)
+/// Owned version of [`BlockHeaderConsensusParameters`]
 #[derive(Debug, Copy, Clone)]
-pub struct BlockHeaderBeaconChainParameters<'a> {
+pub struct OwnedBlockHeaderConsensusParameters {
+    /// Consensus parameters that are always present
+    pub fixed_parameters: BlockHeaderFixedConsensusParameters,
+    /// Super segment root
+    pub super_segment_root: Option<SuperSegmentRoot>,
+    /// Solution range for the next block/era (if any)
+    pub next_solution_range: Option<SolutionRange>,
+    /// Change of parameters to apply to the proof of time chain (if any)
+    pub pot_parameters_change: Option<BlockHeaderPotParametersChange>,
+}
+
+impl OwnedBlockHeaderConsensusParameters {
+    /// Get a reference out of owned version
+    #[inline]
+    pub fn as_ref(&self) -> BlockHeaderConsensusParameters<'_> {
+        BlockHeaderConsensusParameters {
+            fixed_parameters: self.fixed_parameters,
+            super_segment_root: self.super_segment_root.as_ref(),
+            next_solution_range: self.next_solution_range,
+            pot_parameters_change: self.pot_parameters_change.as_ref(),
+        }
+    }
+}
+
+/// Consensus parameters (on the beacon chain)
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct BlockHeaderConsensusParameters<'a> {
     /// Consensus parameters that are always present
     pub fixed_parameters: BlockHeaderFixedConsensusParameters,
     /// Super segment root
@@ -257,7 +318,7 @@ pub struct BlockHeaderBeaconChainParameters<'a> {
     pub pot_parameters_change: Option<&'a BlockHeaderPotParametersChange>,
 }
 
-impl<'a> BlockHeaderBeaconChainParameters<'a> {
+impl<'a> BlockHeaderConsensusParameters<'a> {
     /// Max size of the allocation necessary for this data structure
     pub const MAX_SIZE: u32 = size_of::<BlockHeaderFixedConsensusParameters>() as u32
         + u8::SIZE
@@ -351,13 +412,13 @@ impl<'a> BlockHeaderBeaconChainParameters<'a> {
         } = self;
         let BlockHeaderFixedConsensusParameters {
             solution_range,
-            pot_slot_iterations,
+            slot_iterations,
         } = fixed_parameters;
 
         // TODO: Keyed hash
         let mut hasher = blake3::Hasher::new();
         hasher.update(solution_range.as_bytes());
-        hasher.update(&pot_slot_iterations.get().to_le_bytes());
+        hasher.update(&slot_iterations.get().to_le_bytes());
 
         if let Some(super_segment_root) = super_segment_root {
             hasher.update(super_segment_root.as_bytes());
@@ -428,7 +489,7 @@ impl<'a> BlockHeaderChildShardBlocks<'a> {
     ///
     /// `None` is returned if there are no child shard blocks.
     pub fn root(&self) -> Option<Blake3Hash> {
-        let root = UnbalancedHashedMerkleTree::compute_root_only::<'_, { u32::MAX as usize }, _, _>(
+        let root = UnbalancedMerkleTree::compute_root_only::<'_, { u32::MAX as u64 }, _, _>(
             // TODO: Keyed hash
             self.child_shard_blocks
                 .iter()
@@ -481,6 +542,7 @@ impl BlockHeaderResult {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum BlockHeaderSealType {
     /// Ed25519 signature
     #[cfg_attr(feature = "scale-codec", codec(index = 0))]
@@ -515,8 +577,33 @@ pub struct BlockHeaderEd25519Seal {
     pub signature: Ed25519Signature,
 }
 
+/// Owned version of [`BlockHeaderSeal`]
+#[derive(Debug, Copy, Clone)]
+#[cfg_attr(
+    feature = "scale-codec",
+    derive(Encode, Decode, TypeInfo, MaxEncodedLen)
+)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[non_exhaustive]
+pub enum OwnedBlockHeaderSeal {
+    /// Ed25519 seal
+    Ed25519(BlockHeaderEd25519Seal),
+}
+
+impl OwnedBlockHeaderSeal {
+    /// Get a reference out of owned version
+    #[inline(always)]
+    pub fn as_ref(&self) -> BlockHeaderSeal<'_> {
+        match self {
+            Self::Ed25519(seal) => BlockHeaderSeal::Ed25519(seal),
+        }
+    }
+}
+
 /// Block header seal
 #[derive(Debug, Copy, Clone)]
+#[non_exhaustive]
 pub enum BlockHeaderSeal<'a> {
     /// Ed25519 seal
     Ed25519(&'a BlockHeaderEd25519Seal),
@@ -550,7 +637,7 @@ impl<'a> BlockHeaderSeal<'a> {
     }
 
     /// Verify seal against [`BlockHeader::pre_seal_hash()`]
-    #[cfg(feature = "ed25519-verify")]
+    #[inline]
     pub fn is_seal_valid(&self, pre_seal_hash: &Blake3Hash) -> bool {
         match self {
             BlockHeaderSeal::Ed25519(seal) => seal
@@ -560,7 +647,16 @@ impl<'a> BlockHeaderSeal<'a> {
         }
     }
 
+    /// Derive public key hash from this seal
+    #[inline]
+    pub fn public_key_hash(&self) -> Blake3Hash {
+        match self {
+            BlockHeaderSeal::Ed25519(seal) => seal.public_key.hash(),
+        }
+    }
+
     /// Hash of the block header seal, part of the eventual block root
+    #[inline]
     pub fn hash(&self) -> Blake3Hash {
         match self {
             BlockHeaderSeal::Ed25519(seal) => {
@@ -575,9 +671,9 @@ impl<'a> BlockHeaderSeal<'a> {
     }
 }
 
-/// Generic block header, shared for different kinds of shards
+/// Part of the block header, shared for different kinds of shards
 #[derive(Debug, Copy, Clone)]
-pub struct GenericBlockHeader<'a> {
+pub struct SharedBlockHeader<'a> {
     /// Block header prefix
     pub prefix: &'a BlockHeaderPrefix,
     /// Block header result
@@ -589,28 +685,50 @@ pub struct GenericBlockHeader<'a> {
 }
 
 /// Block header that corresponds to the beacon chain
-#[derive(Debug, Copy, Clone)]
-pub struct BeaconChainBlockHeader<'a> {
-    /// Generic block header
-    pub generic: GenericBlockHeader<'a>,
+#[derive(Debug, Clone, Yokeable)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
+pub struct BeaconChainHeader<'a> {
+    /// Shared block header
+    shared: SharedBlockHeader<'a>,
     /// Information about child shard blocks
-    pub child_shard_blocks: BlockHeaderChildShardBlocks<'a>,
+    child_shard_blocks: BlockHeaderChildShardBlocks<'a>,
     /// Consensus parameters (on the beacon chain)
-    pub consensus_parameters: BlockHeaderBeaconChainParameters<'a>,
+    consensus_parameters: BlockHeaderConsensusParameters<'a>,
     /// All bytes of the header except the seal
-    pub pre_seal_bytes: &'a [u8],
+    pre_seal_bytes: &'a [u8],
+    #[cfg(all(feature = "alloc", any(target_os = "none", target_os = "unknown")))]
+    cached_block_root: rclite::Arc<once_cell::race::OnceBox<BlockRoot>>,
+    #[cfg(not(any(target_os = "none", target_os = "unknown")))]
+    cached_block_root: rclite::Arc<std::sync::OnceLock<BlockRoot>>,
 }
 
-impl<'a> Deref for BeaconChainBlockHeader<'a> {
-    type Target = GenericBlockHeader<'a>;
+impl<'a> Deref for BeaconChainHeader<'a> {
+    type Target = SharedBlockHeader<'a>;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        &self.generic
+        &self.shared
     }
 }
 
-impl<'a> BeaconChainBlockHeader<'a> {
+impl<'a> GenericBlockHeader<'a> for BeaconChainHeader<'a> {
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedBeaconChainHeader;
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
+    }
+
+    #[inline(always)]
+    fn root(&self) -> impl Deref<Target = BlockRoot> {
+        self.root()
+    }
+}
+
+impl<'a> BeaconChainHeader<'a> {
     /// Try to create a new instance from provided bytes.
     ///
     /// `bytes` should be 8-bytes aligned.
@@ -638,13 +756,13 @@ impl<'a> BeaconChainBlockHeader<'a> {
             BlockHeaderChildShardBlocks::try_from_bytes(remainder)?;
 
         let (consensus_parameters, remainder) =
-            BlockHeaderBeaconChainParameters::try_from_bytes(remainder)?;
+            BlockHeaderConsensusParameters::try_from_bytes(remainder)?;
 
         let pre_seal_bytes = &bytes[..bytes.len() - remainder.len()];
 
         let (seal, remainder) = BlockHeaderSeal::try_from_bytes(remainder)?;
 
-        let generic = GenericBlockHeader {
+        let shared = SharedBlockHeader {
             prefix,
             result,
             consensus_info,
@@ -652,10 +770,12 @@ impl<'a> BeaconChainBlockHeader<'a> {
         };
 
         let header = Self {
-            generic,
+            shared,
             child_shard_blocks,
             consensus_parameters,
             pre_seal_bytes,
+            #[cfg(any(feature = "alloc", not(any(target_os = "none", target_os = "unknown"))))]
+            cached_block_root: rclite::Arc::default(),
         };
 
         if !header.is_internally_consistent() {
@@ -665,13 +785,16 @@ impl<'a> BeaconChainBlockHeader<'a> {
         Some((header, remainder))
     }
 
-    /// Check block header's internal consistency
+    /// Check block header's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         let public_key_hash = match self.seal {
             BlockHeaderSeal::Ed25519(seal) => seal.public_key.hash(),
         };
-        public_key_hash == self.generic.consensus_info.solution.public_key_hash
+        public_key_hash == self.shared.consensus_info.solution.public_key_hash
     }
 
     /// The same as [`Self::try_from_bytes()`], but for trusted input that skips some consistency
@@ -697,13 +820,13 @@ impl<'a> BeaconChainBlockHeader<'a> {
             BlockHeaderChildShardBlocks::try_from_bytes(remainder)?;
 
         let (consensus_parameters, remainder) =
-            BlockHeaderBeaconChainParameters::try_from_bytes(remainder)?;
+            BlockHeaderConsensusParameters::try_from_bytes(remainder)?;
 
         let pre_seal_bytes = &bytes[..bytes.len() - remainder.len()];
 
         let (seal, remainder) = BlockHeaderSeal::try_from_bytes(remainder)?;
 
-        let generic = GenericBlockHeader {
+        let shared = SharedBlockHeader {
             prefix,
             result,
             consensus_info,
@@ -712,20 +835,52 @@ impl<'a> BeaconChainBlockHeader<'a> {
 
         Some((
             Self {
-                generic,
+                shared,
                 child_shard_blocks,
                 consensus_parameters,
                 pre_seal_bytes,
+                #[cfg(any(
+                    feature = "alloc",
+                    not(any(target_os = "none", target_os = "unknown"))
+                ))]
+                cached_block_root: rclite::Arc::default(),
             },
             remainder,
         ))
     }
 
     /// Create an owned version of this header
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(self) -> Result<OwnedBeaconChainBlockHeader, OwnedBeaconChainBlockHeaderError> {
-        OwnedBeaconChainBlockHeader::from_header(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedBeaconChainHeader {
+        let unsealed = OwnedBeaconChainHeader::from_parts(
+            self.shared.prefix,
+            self.shared.result,
+            self.shared.consensus_info,
+            &self.child_shard_blocks,
+            self.consensus_parameters,
+        )
+        .expect("`self` is always a valid invariant; qed");
+
+        unsealed.with_seal(self.shared.seal)
+    }
+
+    /// Shared block header
+    #[inline(always)]
+    pub fn shared(&self) -> &SharedBlockHeader<'a> {
+        &self.shared
+    }
+
+    /// Information about child shard blocks
+    #[inline(always)]
+    pub fn child_shard_blocks(&self) -> &BlockHeaderChildShardBlocks<'a> {
+        &self.child_shard_blocks
+    }
+
+    /// Consensus parameters (on the beacon chain)
+    #[inline(always)]
+    pub fn consensus_parameters(&self) -> &BlockHeaderConsensusParameters<'a> {
+        &self.consensus_parameters
     }
 
     /// Hash of the block before seal is applied to it
@@ -735,73 +890,127 @@ impl<'a> BeaconChainBlockHeader<'a> {
         Blake3Hash::from(blake3::hash(self.pre_seal_bytes))
     }
 
-    /// Verify seal against [`BeaconChainBlockHeader::pre_seal_hash()`]
+    /// Verify seal against [`BeaconChainHeader::pre_seal_hash()`] and check that its public key
+    /// hash corresponds to the solution
     #[inline]
-    #[cfg(feature = "ed25519-verify")]
-    pub fn is_seal_valid(&self) -> bool {
-        self.seal.is_seal_valid(&self.pre_seal_hash())
+    pub fn is_sealed_correctly(&self) -> bool {
+        self.consensus_info.solution.public_key_hash == self.seal.public_key_hash()
+            && self.seal.is_seal_valid(&self.pre_seal_hash())
     }
 
     /// Compute block root out of this header.
     ///
     /// Block root is a Merkle Tree Root. The leaves are derived from individual fields in
-    /// [`GenericBlockHeader`] and other fields of this enum in the declaration order.
+    /// [`SharedBlockHeader`] and other fields of this enum in the declaration order.
     ///
-    /// Note that this method does a bunch of hashing and if hash is needed often, should be cached.
+    /// Note that this method computes root by doing a bunch of hashing. The result is then cached
+    /// if `alloc` feature is enabled or when compiled for OS target that is not `none`.
     #[inline]
-    pub fn root(&self) -> BlockRoot {
+    pub fn root(&self) -> impl Deref<Target = BlockRoot> {
         let Self {
-            generic,
+            shared,
             child_shard_blocks,
             consensus_parameters,
             pre_seal_bytes: _,
+            #[cfg(any(feature = "alloc", not(any(target_os = "none", target_os = "unknown"))))]
+            cached_block_root,
         } = self;
-        let GenericBlockHeader {
-            prefix,
-            result,
-            consensus_info,
-            seal,
-        } = generic;
 
-        const MAX_N: usize = 6;
-        let leaves: [_; MAX_N] = [
-            prefix.hash(),
-            result.hash(),
-            consensus_info.hash(),
-            seal.hash(),
-            child_shard_blocks.root().unwrap_or_default(),
-            consensus_parameters.hash(),
-        ];
-        let block_root = UnbalancedHashedMerkleTree::compute_root_only::<MAX_N, _, _>(leaves)
-            .expect("The list is not empty; qed");
+        let compute_root = || {
+            let SharedBlockHeader {
+                prefix,
+                result,
+                consensus_info,
+                seal,
+            } = shared;
 
-        BlockRoot::new(Blake3Hash::new(block_root))
+            const MAX_N: usize = 6;
+            let leaves: [_; MAX_N] = [
+                prefix.hash(),
+                result.hash(),
+                consensus_info.hash(),
+                seal.hash(),
+                child_shard_blocks.root().unwrap_or_default(),
+                consensus_parameters.hash(),
+            ];
+            let block_root =
+                UnbalancedMerkleTree::compute_root_only::<{ MAX_N as u64 }, _, _>(leaves)
+                    .expect("The list is not empty; qed");
+
+            BlockRoot::new(Blake3Hash::new(block_root))
+        };
+
+        #[cfg(not(any(target_os = "none", target_os = "unknown")))]
+        {
+            cached_block_root.get_or_init(compute_root)
+        }
+        #[cfg(all(feature = "alloc", any(target_os = "none", target_os = "unknown")))]
+        {
+            cached_block_root.get_or_init(|| alloc::boxed::Box::new(compute_root()))
+        }
+        #[cfg(all(not(feature = "alloc"), any(target_os = "none", target_os = "unknown")))]
+        {
+            struct Wrapper(BlockRoot);
+
+            impl Deref for Wrapper {
+                type Target = BlockRoot;
+
+                #[inline(always)]
+                fn deref(&self) -> &Self::Target {
+                    &self.0
+                }
+            }
+
+            Wrapper(compute_root())
+        }
     }
 }
 
 /// Block header that corresponds to an intermediate shard
-#[derive(Debug, Copy, Clone)]
-pub struct IntermediateShardBlockHeader<'a> {
-    /// Generic block header
-    pub generic: GenericBlockHeader<'a>,
+#[derive(Debug, Clone, Yokeable)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
+pub struct IntermediateShardHeader<'a> {
+    /// Shared block header
+    shared: SharedBlockHeader<'a>,
     /// Beacon chain info
-    pub beacon_chain_info: &'a BlockHeaderBeaconChainInfo,
+    beacon_chain_info: &'a BlockHeaderBeaconChainInfo,
     /// Information about child shard blocks
-    pub child_shard_blocks: BlockHeaderChildShardBlocks<'a>,
+    child_shard_blocks: BlockHeaderChildShardBlocks<'a>,
     /// All bytes of the header except the seal
-    pub pre_seal_bytes: &'a [u8],
+    pre_seal_bytes: &'a [u8],
+    #[cfg(all(feature = "alloc", any(target_os = "none", target_os = "unknown")))]
+    cached_block_root: rclite::Arc<once_cell::race::OnceBox<BlockRoot>>,
+    #[cfg(not(any(target_os = "none", target_os = "unknown")))]
+    cached_block_root: rclite::Arc<std::sync::OnceLock<BlockRoot>>,
 }
 
-impl<'a> Deref for IntermediateShardBlockHeader<'a> {
-    type Target = GenericBlockHeader<'a>;
+impl<'a> Deref for IntermediateShardHeader<'a> {
+    type Target = SharedBlockHeader<'a>;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        &self.generic
+        &self.shared
     }
 }
 
-impl<'a> IntermediateShardBlockHeader<'a> {
+impl<'a> GenericBlockHeader<'a> for IntermediateShardHeader<'a> {
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedIntermediateShardHeader;
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
+    }
+
+    #[inline(always)]
+    fn root(&self) -> impl Deref<Target = BlockRoot> {
+        self.root()
+    }
+}
+
+impl<'a> IntermediateShardHeader<'a> {
     /// Try to create a new instance from provided bytes.
     ///
     /// `bytes` should be 8-bytes aligned.
@@ -837,7 +1046,7 @@ impl<'a> IntermediateShardBlockHeader<'a> {
 
         let (seal, remainder) = BlockHeaderSeal::try_from_bytes(remainder)?;
 
-        let generic = GenericBlockHeader {
+        let shared = SharedBlockHeader {
             prefix,
             result,
             consensus_info,
@@ -845,10 +1054,12 @@ impl<'a> IntermediateShardBlockHeader<'a> {
         };
 
         let header = Self {
-            generic,
+            shared,
             beacon_chain_info,
             child_shard_blocks,
             pre_seal_bytes,
+            #[cfg(any(feature = "alloc", not(any(target_os = "none", target_os = "unknown"))))]
+            cached_block_root: rclite::Arc::default(),
         };
 
         if !header.is_internally_consistent() {
@@ -858,13 +1069,16 @@ impl<'a> IntermediateShardBlockHeader<'a> {
         Some((header, remainder))
     }
 
-    /// Check block header's internal consistency
+    /// Check block header's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         let public_key_hash = match self.seal {
             BlockHeaderSeal::Ed25519(seal) => seal.public_key.hash(),
         };
-        public_key_hash == self.generic.consensus_info.solution.public_key_hash
+        public_key_hash == self.shared.consensus_info.solution.public_key_hash
     }
 
     /// The same as [`Self::try_from_bytes()`], but for trusted input that skips some consistency
@@ -898,7 +1112,7 @@ impl<'a> IntermediateShardBlockHeader<'a> {
 
         let (seal, remainder) = BlockHeaderSeal::try_from_bytes(remainder)?;
 
-        let generic = GenericBlockHeader {
+        let shared = SharedBlockHeader {
             prefix,
             result,
             consensus_info,
@@ -907,22 +1121,52 @@ impl<'a> IntermediateShardBlockHeader<'a> {
 
         Some((
             Self {
-                generic,
+                shared,
                 beacon_chain_info,
                 child_shard_blocks,
                 pre_seal_bytes,
+                #[cfg(any(
+                    feature = "alloc",
+                    not(any(target_os = "none", target_os = "unknown"))
+                ))]
+                cached_block_root: rclite::Arc::default(),
             },
             remainder,
         ))
     }
 
     /// Create an owned version of this header
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(
-        self,
-    ) -> Result<OwnedIntermediateShardBlockHeader, OwnedIntermediateShardBlockHeaderError> {
-        OwnedIntermediateShardBlockHeader::from_header(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedIntermediateShardHeader {
+        let unsealed = OwnedIntermediateShardHeader::from_parts(
+            self.shared.prefix,
+            self.shared.result,
+            self.shared.consensus_info,
+            self.beacon_chain_info,
+            &self.child_shard_blocks,
+        )
+        .expect("`self` is always a valid invariant; qed");
+
+        unsealed.with_seal(self.shared.seal)
+    }
+
+    /// Shared block header
+    #[inline(always)]
+    pub fn shared(&self) -> &SharedBlockHeader<'a> {
+        &self.shared
+    }
+
+    /// Beacon chain info
+    #[inline(always)]
+    pub fn beacon_chain_info(&self) -> &'a BlockHeaderBeaconChainInfo {
+        self.beacon_chain_info
+    }
+
+    /// Information about child shard blocks
+    #[inline(always)]
+    pub fn child_shard_blocks(&self) -> &BlockHeaderChildShardBlocks<'a> {
+        &self.child_shard_blocks
     }
 
     /// Hash of the block before seal is applied to it
@@ -932,71 +1176,125 @@ impl<'a> IntermediateShardBlockHeader<'a> {
         Blake3Hash::from(blake3::hash(self.pre_seal_bytes))
     }
 
-    /// Verify seal against [`IntermediateShardBlockHeader::pre_seal_hash()`]
+    /// Verify seal against [`IntermediateShardHeader::pre_seal_hash()`] and check that its public
+    /// key hash corresponds to the solution
     #[inline]
-    #[cfg(feature = "ed25519-verify")]
-    pub fn is_seal_valid(&self) -> bool {
-        self.seal.is_seal_valid(&self.pre_seal_hash())
+    pub fn is_sealed_correctly(&self) -> bool {
+        self.consensus_info.solution.public_key_hash == self.seal.public_key_hash()
+            && self.seal.is_seal_valid(&self.pre_seal_hash())
     }
 
     /// Compute block root out of this header.
     ///
     /// Block root is a Merkle Tree Root. The leaves are derived from individual fields in
-    /// [`GenericBlockHeader`] and other fields of this enum in the declaration order.
+    /// [`SharedBlockHeader`] and other fields of this enum in the declaration order.
     ///
-    /// Note that this method does a bunch of hashing and if hash is needed often, should be cached.
+    /// Note that this method computes root by doing a bunch of hashing. The result is then cached
+    /// if `alloc` feature is enabled or when compiled for OS target that is not `none`.
     #[inline]
-    pub fn root(&self) -> BlockRoot {
+    pub fn root(&self) -> impl Deref<Target = BlockRoot> {
         let Self {
-            generic,
+            shared,
             beacon_chain_info,
             child_shard_blocks,
             pre_seal_bytes: _,
+            #[cfg(any(feature = "alloc", not(any(target_os = "none", target_os = "unknown"))))]
+            cached_block_root,
         } = self;
-        let GenericBlockHeader {
-            prefix,
-            result,
-            consensus_info,
-            seal,
-        } = generic;
 
-        const MAX_N: usize = 6;
-        let leaves: [_; MAX_N] = [
-            prefix.hash(),
-            result.hash(),
-            consensus_info.hash(),
-            seal.hash(),
-            beacon_chain_info.hash(),
-            child_shard_blocks.root().unwrap_or_default(),
-        ];
-        let block_root = UnbalancedHashedMerkleTree::compute_root_only::<MAX_N, _, _>(leaves)
-            .expect("The list is not empty; qed");
+        let compute_root = || {
+            let SharedBlockHeader {
+                prefix,
+                result,
+                consensus_info,
+                seal,
+            } = shared;
 
-        BlockRoot::new(Blake3Hash::new(block_root))
+            const MAX_N: usize = 6;
+            let leaves: [_; MAX_N] = [
+                prefix.hash(),
+                result.hash(),
+                consensus_info.hash(),
+                seal.hash(),
+                beacon_chain_info.hash(),
+                child_shard_blocks.root().unwrap_or_default(),
+            ];
+            let block_root =
+                UnbalancedMerkleTree::compute_root_only::<{ MAX_N as u64 }, _, _>(leaves)
+                    .expect("The list is not empty; qed");
+
+            BlockRoot::new(Blake3Hash::new(block_root))
+        };
+
+        #[cfg(not(any(target_os = "none", target_os = "unknown")))]
+        {
+            cached_block_root.get_or_init(compute_root)
+        }
+        #[cfg(all(feature = "alloc", any(target_os = "none", target_os = "unknown")))]
+        {
+            cached_block_root.get_or_init(|| alloc::boxed::Box::new(compute_root()))
+        }
+        #[cfg(all(not(feature = "alloc"), any(target_os = "none", target_os = "unknown")))]
+        {
+            struct Wrapper(BlockRoot);
+
+            impl Deref for Wrapper {
+                type Target = BlockRoot;
+
+                #[inline(always)]
+                fn deref(&self) -> &Self::Target {
+                    &self.0
+                }
+            }
+
+            Wrapper(compute_root())
+        }
     }
 }
 
 /// Block header that corresponds to a leaf shard
-#[derive(Debug, Copy, Clone)]
-pub struct LeafShardBlockHeader<'a> {
-    /// Generic block header
-    pub generic: GenericBlockHeader<'a>,
+#[derive(Debug, Clone, Yokeable)]
+// Prevent creation of potentially broken invariants externally
+#[non_exhaustive]
+pub struct LeafShardHeader<'a> {
+    /// Shared block header
+    shared: SharedBlockHeader<'a>,
     /// Beacon chain info
-    pub beacon_chain_info: &'a BlockHeaderBeaconChainInfo,
+    beacon_chain_info: &'a BlockHeaderBeaconChainInfo,
     /// All bytes of the header except the seal
-    pub pre_seal_bytes: &'a [u8],
+    pre_seal_bytes: &'a [u8],
+    #[cfg(all(feature = "alloc", any(target_os = "none", target_os = "unknown")))]
+    cached_block_root: rclite::Arc<once_cell::race::OnceBox<BlockRoot>>,
+    #[cfg(not(any(target_os = "none", target_os = "unknown")))]
+    cached_block_root: rclite::Arc<std::sync::OnceLock<BlockRoot>>,
 }
 
-impl<'a> Deref for LeafShardBlockHeader<'a> {
-    type Target = GenericBlockHeader<'a>;
+impl<'a> Deref for LeafShardHeader<'a> {
+    type Target = SharedBlockHeader<'a>;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        &self.generic
+        &self.shared
     }
 }
 
-impl<'a> LeafShardBlockHeader<'a> {
+impl<'a> GenericBlockHeader<'a> for LeafShardHeader<'a> {
+    #[cfg(feature = "alloc")]
+    type Owned = OwnedLeafShardHeader;
+
+    #[cfg(feature = "alloc")]
+    #[inline(always)]
+    fn to_owned(self) -> Self::Owned {
+        self.to_owned()
+    }
+
+    #[inline(always)]
+    fn root(&self) -> impl Deref<Target = BlockRoot> {
+        self.root()
+    }
+}
+
+impl<'a> LeafShardHeader<'a> {
     /// Try to create a new instance from provided bytes.
     ///
     /// `bytes` should be 8-bytes aligned.
@@ -1028,7 +1326,7 @@ impl<'a> LeafShardBlockHeader<'a> {
 
         let (seal, remainder) = BlockHeaderSeal::try_from_bytes(remainder)?;
 
-        let generic = GenericBlockHeader {
+        let shared = SharedBlockHeader {
             prefix,
             result,
             consensus_info,
@@ -1036,9 +1334,11 @@ impl<'a> LeafShardBlockHeader<'a> {
         };
 
         let header = Self {
-            generic,
+            shared,
             beacon_chain_info,
             pre_seal_bytes,
+            #[cfg(any(feature = "alloc", not(any(target_os = "none", target_os = "unknown"))))]
+            cached_block_root: rclite::Arc::default(),
         };
 
         if !header.is_internally_consistent() {
@@ -1048,13 +1348,16 @@ impl<'a> LeafShardBlockHeader<'a> {
         Some((header, remainder))
     }
 
-    /// Check block header's internal consistency
+    /// Check block header's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         let public_key_hash = match self.seal {
             BlockHeaderSeal::Ed25519(seal) => seal.public_key.hash(),
         };
-        public_key_hash == self.generic.consensus_info.solution.public_key_hash
+        public_key_hash == self.shared.consensus_info.solution.public_key_hash
     }
 
     /// The same as [`Self::try_from_bytes()`], but for trusted input that skips some consistency
@@ -1084,7 +1387,7 @@ impl<'a> LeafShardBlockHeader<'a> {
 
         let (seal, remainder) = BlockHeaderSeal::try_from_bytes(remainder)?;
 
-        let generic = GenericBlockHeader {
+        let shared = SharedBlockHeader {
             prefix,
             result,
             consensus_info,
@@ -1093,19 +1396,43 @@ impl<'a> LeafShardBlockHeader<'a> {
 
         Some((
             Self {
-                generic,
+                shared,
                 beacon_chain_info,
                 pre_seal_bytes,
+                #[cfg(any(
+                    feature = "alloc",
+                    not(any(target_os = "none", target_os = "unknown"))
+                ))]
+                cached_block_root: rclite::Arc::default(),
             },
             remainder,
         ))
     }
 
     /// Create an owned version of this header
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(self) -> OwnedLeafShardBlockHeader {
-        OwnedLeafShardBlockHeader::from_header(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedLeafShardHeader {
+        let unsealed = OwnedLeafShardHeader::from_parts(
+            self.shared.prefix,
+            self.shared.result,
+            self.shared.consensus_info,
+            self.beacon_chain_info,
+        );
+
+        unsealed.with_seal(self.shared.seal)
+    }
+
+    /// Shared block header
+    #[inline(always)]
+    pub fn shared(&self) -> &SharedBlockHeader<'a> {
+        &self.shared
+    }
+
+    /// Beacon chain info
+    #[inline(always)]
+    pub fn beacon_chain_info(&self) -> &'a BlockHeaderBeaconChainInfo {
+        self.beacon_chain_info
     }
 
     /// Hash of the block before seal is applied to it
@@ -1115,45 +1442,77 @@ impl<'a> LeafShardBlockHeader<'a> {
         Blake3Hash::from(blake3::hash(self.pre_seal_bytes))
     }
 
-    /// Verify seal against [`LeafShardBlockHeader::pre_seal_hash()`]
+    /// Verify seal against [`LeafShardHeader::pre_seal_hash()`] and check that its public key hash
+    /// corresponds to the solution
     #[inline]
-    #[cfg(feature = "ed25519-verify")]
-    pub fn is_seal_valid(&self) -> bool {
-        self.seal.is_seal_valid(&self.pre_seal_hash())
+    pub fn is_sealed_correctly(&self) -> bool {
+        self.consensus_info.solution.public_key_hash == self.seal.public_key_hash()
+            && self.seal.is_seal_valid(&self.pre_seal_hash())
     }
 
     /// Compute block root out of this header.
     ///
     /// Block root is a Merkle Tree Root. The leaves are derived from individual fields in
-    /// [`GenericBlockHeader`] and other fields of this enum in the declaration order.
+    /// [`SharedBlockHeader`] and other fields of this enum in the declaration order.
     ///
-    /// Note that this method does a bunch of hashing and if hash is needed often, should be cached.
+    /// Note that this method computes root by doing a bunch of hashing. The result is then cached
+    /// if `alloc` feature is enabled or when compiled for OS target that is not `none`.
     #[inline]
-    pub fn root(&self) -> BlockRoot {
+    pub fn root(&self) -> impl Deref<Target = BlockRoot> {
         let Self {
-            generic,
+            shared,
             beacon_chain_info,
             pre_seal_bytes: _,
+            #[cfg(any(feature = "alloc", not(any(target_os = "none", target_os = "unknown"))))]
+            cached_block_root,
         } = self;
-        let GenericBlockHeader {
-            prefix,
-            result,
-            consensus_info,
-            seal,
-        } = generic;
 
-        const MAX_N: usize = 5;
-        let leaves: [_; MAX_N] = [
-            prefix.hash(),
-            result.hash(),
-            consensus_info.hash(),
-            seal.hash(),
-            beacon_chain_info.hash(),
-        ];
-        let block_root = UnbalancedHashedMerkleTree::compute_root_only::<MAX_N, _, _>(leaves)
-            .expect("The list is not empty; qed");
+        let compute_root = || {
+            let SharedBlockHeader {
+                prefix,
+                result,
+                consensus_info,
+                seal,
+            } = shared;
 
-        BlockRoot::new(Blake3Hash::new(block_root))
+            const MAX_N: usize = 5;
+            let leaves: [_; MAX_N] = [
+                prefix.hash(),
+                result.hash(),
+                consensus_info.hash(),
+                seal.hash(),
+                beacon_chain_info.hash(),
+            ];
+            let block_root =
+                UnbalancedMerkleTree::compute_root_only::<{ MAX_N as u64 }, _, _>(leaves)
+                    .expect("The list is not empty; qed");
+
+            BlockRoot::new(Blake3Hash::new(block_root))
+        };
+
+        #[cfg(not(any(target_os = "none", target_os = "unknown")))]
+        {
+            cached_block_root.get_or_init(compute_root)
+        }
+        #[cfg(all(feature = "alloc", any(target_os = "none", target_os = "unknown")))]
+        {
+            cached_block_root.get_or_init(|| alloc::boxed::Box::new(compute_root()))
+        }
+        #[cfg(all(not(feature = "alloc"), any(target_os = "none", target_os = "unknown")))]
+        {
+            struct Wrapper(BlockRoot);
+
+            impl Deref for Wrapper {
+                type Target = BlockRoot;
+
+                #[inline(always)]
+                fn deref(&self) -> &Self::Target {
+                    &self.0
+                }
+            }
+
+            Wrapper(compute_root())
+        }
     }
 }
 
@@ -1161,18 +1520,18 @@ impl<'a> LeafShardBlockHeader<'a> {
 ///
 /// [`BlockBody`]: crate::block::body::BlockBody
 /// [`Block`]: crate::block::Block
-#[derive(Debug, Copy, Clone, From)]
+#[derive(Debug, Clone, From)]
 pub enum BlockHeader<'a> {
     /// Block header corresponds to the beacon chain
-    BeaconChain(BeaconChainBlockHeader<'a>),
+    BeaconChain(BeaconChainHeader<'a>),
     /// Block header corresponds to an intermediate shard
-    IntermediateShard(IntermediateShardBlockHeader<'a>),
+    IntermediateShard(IntermediateShardHeader<'a>),
     /// Block header corresponds to a leaf shard
-    LeafShard(LeafShardBlockHeader<'a>),
+    LeafShard(LeafShardHeader<'a>),
 }
 
 impl<'a> Deref for BlockHeader<'a> {
-    type Target = GenericBlockHeader<'a>;
+    type Target = SharedBlockHeader<'a>;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
@@ -1195,15 +1554,15 @@ impl<'a> BlockHeader<'a> {
     pub fn try_from_bytes(bytes: &'a [u8], shard_kind: ShardKind) -> Option<(Self, &'a [u8])> {
         match shard_kind {
             ShardKind::BeaconChain => {
-                let (header, remainder) = BeaconChainBlockHeader::try_from_bytes(bytes)?;
+                let (header, remainder) = BeaconChainHeader::try_from_bytes(bytes)?;
                 Some((Self::BeaconChain(header), remainder))
             }
             ShardKind::IntermediateShard => {
-                let (header, remainder) = IntermediateShardBlockHeader::try_from_bytes(bytes)?;
+                let (header, remainder) = IntermediateShardHeader::try_from_bytes(bytes)?;
                 Some((Self::IntermediateShard(header), remainder))
             }
             ShardKind::LeafShard => {
-                let (header, remainder) = LeafShardBlockHeader::try_from_bytes(bytes)?;
+                let (header, remainder) = LeafShardHeader::try_from_bytes(bytes)?;
                 Some((Self::LeafShard(header), remainder))
             }
             ShardKind::Phantom | ShardKind::Invalid => {
@@ -1213,7 +1572,10 @@ impl<'a> BlockHeader<'a> {
         }
     }
 
-    /// Check block header's internal consistency
+    /// Check block header's internal consistency.
+    ///
+    /// This is usually not necessary to be called explicitly since internal consistency is checked
+    /// by [`Self::try_from_bytes()`] internally.
     #[inline]
     pub fn is_internally_consistent(&self) -> bool {
         match self {
@@ -1232,16 +1594,15 @@ impl<'a> BlockHeader<'a> {
     ) -> Option<(Self, &'a [u8])> {
         match shard_kind {
             ShardKind::BeaconChain => {
-                let (header, remainder) = BeaconChainBlockHeader::try_from_bytes_unchecked(bytes)?;
+                let (header, remainder) = BeaconChainHeader::try_from_bytes_unchecked(bytes)?;
                 Some((Self::BeaconChain(header), remainder))
             }
             ShardKind::IntermediateShard => {
-                let (header, remainder) =
-                    IntermediateShardBlockHeader::try_from_bytes_unchecked(bytes)?;
+                let (header, remainder) = IntermediateShardHeader::try_from_bytes_unchecked(bytes)?;
                 Some((Self::IntermediateShard(header), remainder))
             }
             ShardKind::LeafShard => {
-                let (header, remainder) = LeafShardBlockHeader::try_from_bytes_unchecked(bytes)?;
+                let (header, remainder) = LeafShardHeader::try_from_bytes_unchecked(bytes)?;
                 Some((Self::LeafShard(header), remainder))
             }
             ShardKind::Phantom | ShardKind::Invalid => {
@@ -1264,8 +1625,7 @@ impl<'a> BlockHeader<'a> {
         // SAFETY: All bit patterns are valid
         let prefix = unsafe { BlockHeaderPrefix::from_bytes(prefix) }?;
 
-        if !(prefix.version == BlockHeaderPrefix::BLOCK_VERSION
-            && prefix.padding == [0; _]
+        if !(prefix.padding_0 == [0; _]
             && prefix.shard_index.as_u32() <= ShardIndex::MAX_SHARD_INDEX)
         {
             return None;
@@ -1287,10 +1647,14 @@ impl<'a> BlockHeader<'a> {
     }
 
     /// Create an owned version of this header
-    #[inline(always)]
     #[cfg(feature = "alloc")]
-    pub fn to_owned(self) -> Result<OwnedBlockHeader, OwnedBlockHeaderError> {
-        OwnedBlockHeader::from_header(self)
+    #[inline(always)]
+    pub fn to_owned(self) -> OwnedBlockHeader {
+        match self {
+            Self::BeaconChain(header) => header.to_owned().into(),
+            Self::IntermediateShard(header) => header.to_owned().into(),
+            Self::LeafShard(header) => header.to_owned().into(),
+        }
     }
 
     /// Hash of the block before seal is applied to it
@@ -1303,26 +1667,55 @@ impl<'a> BlockHeader<'a> {
         }
     }
 
-    /// Verify seal against [`BlockHeader::pre_seal_hash()`]
+    /// Verify seal against [`BlockHeader::pre_seal_hash()`] and check that its public key hash
+    /// corresponds to the solution
     #[inline]
-    #[cfg(feature = "ed25519-verify")]
-    pub fn is_seal_valid(&self) -> bool {
-        self.seal.is_seal_valid(&self.pre_seal_hash())
+    pub fn is_sealed_correctly(&self) -> bool {
+        match self {
+            Self::BeaconChain(header) => header.is_sealed_correctly(),
+            Self::IntermediateShard(header) => header.is_sealed_correctly(),
+            Self::LeafShard(header) => header.is_sealed_correctly(),
+        }
     }
 
     /// Compute block root out of this header.
     ///
     /// Block root is a Merkle Tree Root. The leaves are derived from individual fields in
-    /// [`GenericBlockHeader`] and other fields of this enum in the declaration order.
+    /// [`SharedBlockHeader`] and other fields of this enum in the declaration order.
     ///
-    /// Note that this method does a bunch of hashing and if hash is needed often, should be cached.
+    /// Note that this method computes root by doing a bunch of hashing. The result is then cached
+    /// if `alloc` feature is enabled.
     #[inline]
-    pub fn root(&self) -> BlockRoot {
+    pub fn root(&self) -> impl Deref<Target = BlockRoot> {
+        enum Wrapper<B, I, L> {
+            BeaconChain(B),
+            IntermediateShard(I),
+            LeafShard(L),
+        }
+
+        impl<B, I, L> Deref for Wrapper<B, I, L>
+        where
+            B: Deref<Target = BlockRoot>,
+            I: Deref<Target = BlockRoot>,
+            L: Deref<Target = BlockRoot>,
+        {
+            type Target = BlockRoot;
+
+            #[inline(always)]
+            fn deref(&self) -> &Self::Target {
+                match self {
+                    Wrapper::BeaconChain(block_root) => block_root,
+                    Wrapper::IntermediateShard(block_root) => block_root,
+                    Wrapper::LeafShard(block_root) => block_root,
+                }
+            }
+        }
+
         // TODO: Should unique keyed hash be used for different kinds of shards?
         match self {
-            Self::BeaconChain(header) => header.root(),
-            Self::IntermediateShard(header) => header.root(),
-            Self::LeafShard(header) => header.root(),
+            Self::BeaconChain(header) => Wrapper::BeaconChain(header.root()),
+            Self::IntermediateShard(header) => Wrapper::IntermediateShard(header.root()),
+            Self::LeafShard(header) => Wrapper::LeafShard(header.root()),
         }
     }
 }

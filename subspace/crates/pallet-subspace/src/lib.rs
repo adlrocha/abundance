@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
-#![feature(array_chunks, assert_matches, generic_arg_infer)]
+#![feature(array_chunks, assert_matches)]
 #![warn(unused_must_use, unsafe_code, unused_variables)]
 
 extern crate alloc;
@@ -55,11 +55,6 @@ impl<O: Into<Result<RawOrigin, O>> + From<RawOrigin>> EnsureOrigin<O> for Ensure
         o.into().map(|o| match o {
             RawOrigin::ValidatedUnsigned => (),
         })
-    }
-
-    #[cfg(feature = "runtime-benchmarks")]
-    fn try_successful_origin() -> Result<O, ()> {
-        Ok(O::from(RawOrigin::ValidatedUnsigned))
     }
 }
 
@@ -582,8 +577,7 @@ impl<T: Config> Pallet<T> {
                 } else {
                     next_solution_range = solution_ranges.current.derive_next(
                         // If Era start slot is not found it means we have just finished the first era
-                        EraStartSlot::<T>::get().unwrap_or_default(),
-                        current_slot,
+                        current_slot - EraStartSlot::<T>::get().unwrap_or_default(),
                         slot_probability,
                         BlockNumber::new(
                             <BlockNumberFor<T> as TryInto<u64>>::try_into(era_duration)

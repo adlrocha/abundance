@@ -11,7 +11,7 @@ use crate::transaction::owned::{OwnedTransaction, OwnedTransactionError};
 use ab_io_type::trivial_type::TrivialType;
 use blake3::Hasher;
 use core::slice;
-use derive_more::{Deref, DerefMut, From, Into};
+use derive_more::{Deref, DerefMut, Display, From, Into};
 
 /// A measure of compute resources, 1 Gas == 1 ns of compute on reference hardware
 #[derive(Debug, Default, Copy, Clone, TrivialType)]
@@ -21,6 +21,7 @@ pub struct Gas(u64);
 /// Transaction hash
 #[derive(
     Debug,
+    Display,
     Default,
     Copy,
     Clone,
@@ -56,6 +57,7 @@ impl AsMut<[u8]> for TransactionHash {
 #[derive(Debug, Copy, Clone, TrivialType)]
 #[repr(C)]
 pub struct TransactionHeader {
+    // TODO: Right now this is primarily used for data alignment, but is it useful in general?
     // TODO: Some more complex field?
     /// Transaction version
     pub version: u64,
