@@ -1107,3 +1107,46 @@ To discuss next around segment submission:
 
 > TODO: The most immediate priority is to have the script updated with the two models and start
 > playing with the protocol parameters. It can also help implementing the expiration there.
+
+## Meeting 2025-06-26
+
+1. Conclusions from the script and the model.
+
+- The reshuffling interval will always be one as long as the proportion of honest storage is above
+  the security bound (we can ensure that we will always have an honest majority after a reshuffle in
+  all shards).
+- The reshuffling interval depends on the throughput from malicious nodes.
+
+> TODO: Add descriptions about about the parameters and how the script works so anyone can run it
+> and build upon it.
+
+1. Expiration Logic
+
+- The effective range should go below the latest history size.
+- Initial range 0 to 0
+- Share the code for the plot range so people can play with it.
+- How much we are limiting the plot size for the history range?
+- Do we actually maintain this properties.
+
+## Meeting 2025-06-30
+
+- Effective range update.
+  - TODO: Share with Nazar.
+- Ranges to see what has expired in the visualisation.
+- Sector expiration validation.
+
+  - Use this code as a base to share how I am thinking this should be verified:
+    - https://github.com/nazar-pc/abundance/blob/419c7d8ef57912088cfdd4a71dfb1908f2fb7d34/crates/node/ab-client-block-verification/src/beacon_chain.rs
+    - https://github.com/nazar-pc/abundance/blob/419c7d8ef57912088cfdd4a71dfb1908f2fb7d34/crates/shared/ab-core-primitives/src/solutions.rs
+    - https://github.com/nazar-pc/abundance/blob/419c7d8ef57912088cfdd4a71dfb1908f2fb7d34/crates/shared/ab-core-primitives/src/solutions.rs#L542-L596
+
+- Next steps till contract end.
+
+  - Give me enough clarity so that I can implement it.
+  - Leave enough documentation so that anyone can peer-review.
+  - Simulation of the protocol.
+    - Fork the spec and try to change the things that we need to change.
+    - https://github.com/subspace/protocol-specs
+
+- As the history gets bigger there may be some time that you may increase by 2x, what is the actual
+  model behind it? Is there an upper bound or does it change it with history range?
